@@ -8,6 +8,10 @@ from dateutil.relativedelta import relativedelta
 from flask_mail import Mail, Message
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired
 import secrets
+import random
+import string
+
+
 
 app = Flask(__name__)
 CORS(app)  # Habilitar CORS para todas las rutas y dominios
@@ -81,6 +85,31 @@ def login():
         # Crear token de acceso JWT
         access_token = create_access_token(identity=user_id)
 
+        # Verificar si el usuario pertenece a algún grupo o es administrador de uno
+        pertenece_a_grupo = False
+        es_admin_grupo = False
+        grupos_administrados = []
+        grupos_pertenecientes = []
+
+        # Verificar si es administrador de algún grupo
+        cursor.execute("SELECT ID_Grupo, Nombre_Grupo FROM Grupo WHERE ID_Admin = %s", (user_id,))
+        grupos_admin = cursor.fetchall()
+        if grupos_admin:
+            es_admin_grupo = True
+            grupos_administrados = grupos_admin
+
+        # Verificar si es miembro de algún grupo
+        cursor.execute("""
+            SELECT g.ID_Grupo, g.Nombre_Grupo 
+            FROM Grupo g
+            JOIN Miembro_Grupo mg ON g.ID_Grupo = mg.ID_Grupo
+            WHERE mg.ID_Usuario = %s OR mg.Email = %s
+        """, (user_id, email))
+        grupos_miembro = cursor.fetchall()
+        if grupos_miembro:
+            pertenece_a_grupo = True
+            grupos_pertenecientes = grupos_miembro
+
         # Verificar si el usuario tiene ingresos registrados
         query_income = """
         SELECT ID_Ingreso, Descripcion, Monto, Fecha, Periodicidad, EsFijo 
@@ -90,102 +119,62 @@ def login():
         cursor.execute(query_income, (user_id,))
         incomes = cursor.fetchall()
 
-        if incomes:
-            mostrar_tab_periodo = False
-            descripcion = None
-            fecha_ultimo_ingreso = None
+        hasIncome = bool(incomes)
+        mostrar_tab_periodo = False
+        descripcion = None
+        fecha_ultimo_ingreso = None
 
-            # Establecer hasIncome en True porque ya tiene ingresos registrados
-            hasIncome = True
+        if hasIncome:
             print(f"El usuario tiene {len(incomes)} ingresos registrados.")
-
             # Agrupar ingresos no fijos por descripción y seleccionar el más reciente
-            ingresos_no_fijos = {}
-            for income in incomes:
-                if income['EsFijo'] == 0:
-                    descripcion = income['Descripcion']
-                    if descripcion not in ingresos_no_fijos or income['Fecha'] > ingresos_no_fijos[descripcion]['Fecha']:
-                        ingresos_no_fijos[descripcion] = income
+            ingresos_no_fijos = {income['Descripcion']: income for income in incomes if income['EsFijo'] == 0}
 
             # Verificar si hay ingresos no fijos registrados
-            if not ingresos_no_fijos:
-                connection.close()
-                print("No tiene ingresos no fijos, no se mostrará ninguna ventana flotante.")
-                return jsonify({
-                    "message": "Login exitoso",
-                    "token": access_token,  # Retornar el token en la respuesta
-                    "user": user,
-                    "hasIncome": hasIncome,
-                    "showFloatingTabIncome": False,
-                    "showFloatingTab": False
-                }), 200
-
-            # Verificar cada ingreso no fijo para determinar si se debe mostrar la ventana flotante de periodicidad
-            for descripcion, income in ingresos_no_fijos.items():
-                fecha_ultimo_ingreso = income['Fecha']
-                periodicidad = income['Periodicidad']
-
-                print(f"Fecha del último ingreso para {descripcion}: {fecha_ultimo_ingreso}")
-                print(f"Periodicidad: {periodicidad}")
+            if ingresos_no_fijos:
+                for descripcion, income in ingresos_no_fijos.items():
+                    fecha_ultimo_ingreso = income['Fecha']
+                    periodicidad = income['Periodicidad']
                     
-                # Determinar la fecha de comparación en base a la periodicidad
-                if periodicidad == 'Diario':
-                    fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(days=1)
-                elif periodicidad == 'Semanal':
-                    fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(weeks=1)
-                elif periodicidad == 'Quincenal':
-                    fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(weeks=2)
-                elif periodicidad == 'Mensual':
-                    fecha_siguiente_ingreso = fecha_ultimo_ingreso + relativedelta(months=1)
+                    # Calcular la fecha de comparación según la periodicidad
+                    if periodicidad == 'Diario':
+                        fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(days=1)
+                    elif periodicidad == 'Semanal':
+                        fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(weeks=1)
+                    elif periodicidad == 'Quincenal':
+                        fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(weeks=2)
+                    elif periodicidad == 'Mensual':
+                        fecha_siguiente_ingreso = fecha_ultimo_ingreso + relativedelta(months=1)
 
-                fecha_actual = datetime.now().date()
-                print(f"Fecha actual: {fecha_actual}")
-                print(f"Fecha siguiente ingreso para {descripcion}: {fecha_siguiente_ingreso}")
+                    if datetime.now().date() >= fecha_siguiente_ingreso:
+                        mostrar_tab_periodo = True
+                        break
 
-                if fecha_actual >= fecha_siguiente_ingreso:
-                    mostrar_tab_periodo = True
-                    break  # Si se debe mostrar la ventana de periodo, no es necesario seguir iterando
+        connection.close()
 
-            connection.close()
+        # Generar la respuesta final sin almacenar en localStorage
+        response_data = {
+            "message": "Login exitoso",
+            "token": access_token,
+            "user": user,
+            "hasIncome": hasIncome,
+            "showFloatingTabIncome": mostrar_tab_periodo,
+            "descripcionIngreso": descripcion,
+            "fechaUltimoIngreso": fecha_ultimo_ingreso.strftime('%d/%m/%Y') if fecha_ultimo_ingreso else None,
+            "showFloatingTab": not hasIncome and not incomes,
+            "pertenece_a_grupo": pertenece_a_grupo,
+            "es_admin_grupo": es_admin_grupo,
+            "grupos_administrados": grupos_administrados,
+            "grupos_pertenecientes": grupos_pertenecientes
+        }
 
-            if mostrar_tab_periodo:
-                print("Mostrar ventana flotante para actualizar ingreso según el periodo.")
-                return jsonify({
-                    "message": "Login exitoso",
-                    "token": access_token,  # Retornar el token en la respuesta
-                    "user": user,
-                    "hasIncome": hasIncome,  # Indicar que tiene ingresos
-                    "showFloatingTabIncome": True,
-                    "descripcionIngreso": descripcion,
-                    "fechaUltimoIngreso": fecha_ultimo_ingreso.strftime('%d/%m/%Y')
-                }), 200
-            else:
-                print("No se mostrará ninguna ventana flotante.")
-                return jsonify({
-                    "message": "Login exitoso",
-                    "token": access_token,  # Retornar el token en la respuesta
-                    "user": user,
-                    "hasIncome": hasIncome,  # Indicar que tiene ingresos
-                    "showFloatingTabIncome": False,
-                    "showFloatingTab": False  # No mostrar la tab de captura inicial si ya tiene ingresos
-                }), 200
-        else:
-            # Si no tiene ningún ingreso registrado, se debe mostrar la ventana para capturar ingresos iniciales
-            hasIncome = False
-            connection.close()
-            print("No tiene ingresos registrados, mostrar ventana para capturar ingresos iniciales.")
-            return jsonify({
-                "message": "Login exitoso",
-                "token": access_token,  # Retornar el token en la respuesta
-                "user": user,
-                "hasIncome": hasIncome,  # Indicar que no tiene ingresos
-                "showFloatingTabIncome": False,
-                "showFloatingTab": True  # Mostrar la ventana para capturar los ingresos iniciales
-            }), 200
+        return jsonify(response_data), 200
     else:
         connection.close()
-        print("Correo o contraseña incorrectos.")
         return jsonify({"error": "Correo o contraseña incorrectos"}), 401
+
+
+
+
 
 # FUNCION DE REGISTRO DE USUARIOS (No protegida)
 @app.route('/api/register', methods=['POST'])
@@ -585,16 +574,19 @@ def get_income_by_id(id_ingreso):
 @jwt_required()
 def agregar_gasto():
     data = request.json
-    id_usuario = get_jwt_identity()  # Obtener el ID del usuario desde el token JWT
+    print("Datos recibidos en el backend para gasto:", data)  # Para verificar el payload en consola
 
+    id_usuario = get_jwt_identity()  # Obtener el ID del usuario desde el token JWT
     descripcion = data.get('descripcion')
     monto = data.get('monto')
     fecha = data.get('fecha', None)
     categoria = data.get('categoria')
-    periodico = data.get('periodico', False)
+    id_subcategoria = data.get('id_subcategoria')  # Asegurarse de que sea un ID
+    periodicidad = data.get('periodicidad', None)  # Se espera como None si es único
+    periodico = data.get('periodico', 1)  # Por defecto, asumir que es periódico
     id_grupo = data.get('id_grupo', None)
 
-    # Verificar si se envió una fecha en el payload; si no, usar la fecha actual
+    # Validación de la fecha, si no está en el payload, se usa la fecha actual
     if fecha:
         try:
             fecha = datetime.strptime(fecha, '%Y-%m-%d').date()
@@ -603,28 +595,41 @@ def agregar_gasto():
     else:
         fecha = datetime.now().date()
 
-    # Verificar datos obligatorios
+    # Validación de campos obligatorios
     if not descripcion or not monto or not categoria:
         return jsonify({"error": "Datos incompletos"}), 400
 
-    # Conexión a la base de datos
+    # Configuración de la conexión a la base de datos
     connection = create_connection()
     if connection is None:
         return jsonify({"error": "Error al conectar a la base de datos"}), 500
 
     cursor = connection.cursor()
 
-    # Insertar el nuevo gasto
+    # Si es único, periodicidad será NULL
     query = """
-    INSERT INTO Gasto (Descripcion, Monto, Fecha, Categoria, Periodico, ID_Usuario, ID_Grupo)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO Gasto (Descripcion, Monto, Fecha, Categoria, ID_Subcategoria, Periodico, ID_Usuario, ID_Grupo, Periodicidad)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
-    cursor.execute(query, (descripcion, monto, fecha, categoria, periodico, id_usuario, id_grupo))
+    cursor.execute(query, (
+        descripcion,
+        monto,
+        fecha,
+        categoria,
+        id_subcategoria,
+        periodico,
+        id_usuario,
+        id_grupo,
+        periodicidad if periodico == 1 else None  # Almacena periodicidad solo si es periódico
+    ))
 
     connection.commit()
     connection.close()
 
     return jsonify({"message": "Gasto registrado con éxito"}), 201
+
+
+
 
 
 @app.route('/api/user/gastos', methods=['GET'])
@@ -637,14 +642,16 @@ def obtener_gastos_usuario():
     if connection is None:
         return jsonify({"error": "Error al conectar a la base de datos"}), 500
 
-    cursor = connection.cursor()
+    cursor = connection.cursor(dictionary=True)
 
-    # Obtener los gastos del usuario
+    # Obtener los gastos del usuario junto con el nombre de la subcategoría
     query = """
-    SELECT ID_Gasto, Descripcion, Monto, Fecha, Categoria, Periodico, ID_Grupo
-    FROM Gasto
-    WHERE ID_Usuario = %s
-    ORDER BY Fecha DESC
+    SELECT G.ID_Gasto, G.Descripcion, G.Monto, G.Fecha, G.Categoria, G.Periodicidad, 
+           G.Periodico, G.ID_Grupo, S.Nombre AS Subcategoria
+    FROM Gasto G
+    LEFT JOIN Subcategoria S ON G.ID_Subcategoria = S.ID_Subcategoria
+    WHERE G.ID_Usuario = %s
+    ORDER BY G.Fecha DESC
     """
     cursor.execute(query, (id_usuario,))
     gastos = cursor.fetchall()
@@ -654,18 +661,22 @@ def obtener_gastos_usuario():
     # Convertir el resultado en formato JSON
     gastos_json = [
         {
-            "ID_Gasto": gasto[0],
-            "Descripcion": gasto[1],
-            "Monto": gasto[2],
-            "Fecha": gasto[3],
-            "Categoria": gasto[4],
-            "Periodico": gasto[5],
-            "ID_Grupo": gasto[6],
+            "ID_Gasto": gasto["ID_Gasto"],
+            "Descripcion": gasto["Descripcion"],
+            "Monto": gasto["Monto"],
+            "Fecha": gasto["Fecha"].strftime('%Y-%m-%d'),  # Formato de fecha para JSON
+            "Categoria": gasto["Categoria"],
+            "Periodicidad": gasto["Periodicidad"],
+            "Periodico": gasto["Periodico"],
+            "ID_Grupo": gasto["ID_Grupo"],
+            "Subcategoria": gasto["Subcategoria"]  # Añadir el nombre de la subcategoría
         }
         for gasto in gastos
     ]
 
     return jsonify(gastos_json), 200
+
+
 
 
 @app.route('/api/gasto/<int:id_gasto>', methods=['PUT'])
@@ -797,7 +808,422 @@ def filtrar_gastos_usuario():
 
     return jsonify(gastos_json), 200
 
+@app.route('/api/subcategorias/<string:categoria>', methods=['GET'])
+@jwt_required()
+def obtener_subcategorias(categoria):
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
 
+    cursor = connection.cursor(dictionary=True)
+
+    # Buscar subcategorías según la categoría
+    query = "SELECT ID_Subcategoria, Nombre FROM Subcategoria WHERE Categoria = %s"
+    cursor.execute(query, (categoria,))
+    subcategorias = cursor.fetchall()
+
+    connection.close()
+
+    # Retornar el ID y el Nombre de cada subcategoría
+    return jsonify(subcategorias), 200
+
+    # Obtener metas financieras
+@app.route('/api/metas', methods=['GET'])
+@jwt_required()
+def obtener_metas():
+    user_id = get_jwt_identity()
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+    
+    cursor = connection.cursor(dictionary=True)
+    query = """
+        SELECT ID_Meta, Nombre, MontoObjetivo, FechaInicio, FechaTermino, MesesParaMeta, AhorroMensual 
+        FROM Metas 
+        WHERE ID_Usuario = %s
+    """
+    cursor.execute(query, (user_id,))
+    metas = cursor.fetchall()
+    
+    connection.close()
+    return jsonify(metas), 200
+
+
+#Crear metas
+@app.route('/api/metas', methods=['POST'])
+@jwt_required()
+def crear_meta():
+    user_id = get_jwt_identity()
+    data = request.json
+    nombre = data.get('nombre')
+    monto_objetivo = data.get('montoObjetivo')
+    fecha_inicio = data.get('fechaInicio')
+    fecha_termino = data.get('fechaTermino')
+    meses_para_meta = data.get('mesesParaMeta')
+    ahorro_mensual = data.get('ahorroMensual')
+    
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+    
+    cursor = connection.cursor()
+    query = """
+        INSERT INTO Metas (ID_Usuario, Nombre, MontoObjetivo, FechaInicio, FechaTermino, MesesParaMeta, AhorroMensual)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """
+    cursor.execute(query, (user_id, nombre, monto_objetivo, fecha_inicio, fecha_termino, meses_para_meta, ahorro_mensual))
+    connection.commit()
+    
+    connection.close()
+    return jsonify({"message": "Meta creada exitosamente"}), 201
+
+
+
+@app.route('/api/validar-ingresos-gastos', methods=['GET'])
+@jwt_required()
+def validar_ingresos_gastos():
+    user_id = get_jwt_identity()
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+    
+    cursor = connection.cursor(dictionary=True)
+    
+    # Contar ingresos del usuario
+    query_ingresos = "SELECT COUNT(*) as total FROM Ingreso WHERE ID_Usuario = %s"
+    cursor.execute(query_ingresos, (user_id,))
+    total_ingresos = cursor.fetchone()['total']
+    
+    # Contar gastos del usuario
+    query_gastos = "SELECT COUNT(*) as total FROM Gasto WHERE ID_Usuario = %s"
+    cursor.execute(query_gastos, (user_id,))
+    total_gastos = cursor.fetchone()['total']
+    
+    connection.close()
+    
+    if total_ingresos >= 3 and total_gastos >= 3:
+        return jsonify({"valido": True}), 200
+    else:
+        return jsonify({"valido": False}), 200
+
+@app.route('/api/promedios', methods=['GET'])
+@jwt_required()
+def obtener_promedios():
+    user_id = get_jwt_identity()
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+    
+    cursor = connection.cursor(dictionary=True)
+    
+    # Calcular promedio de ingresos del usuario
+    query_promedio_ingresos = "SELECT AVG(Monto) as promedio_ingresos FROM Ingreso WHERE ID_Usuario = %s"
+    cursor.execute(query_promedio_ingresos, (user_id,))
+    promedio_ingresos = cursor.fetchone()['promedio_ingresos']
+    
+    # Calcular promedio de gastos del usuario
+    query_promedio_gastos = "SELECT AVG(Monto) as promedio_gastos FROM Gasto WHERE ID_Usuario = %s"
+    cursor.execute(query_promedio_gastos, (user_id,))
+    promedio_gastos = cursor.fetchone()['promedio_gastos']
+    
+    connection.close()
+    
+    # Calcular el valor disponible para metas
+    disponible_para_metas = promedio_ingresos - promedio_gastos
+    
+    return jsonify({
+        "promedio_ingresos": promedio_ingresos,
+        "promedio_gastos": promedio_gastos,
+        "disponible_para_metas": disponible_para_metas
+    }), 200
+
+# Eliminar meta financiera
+@app.route('/api/metas/<int:id_meta>', methods=['DELETE'])
+@jwt_required()
+def eliminar_meta(id_meta):
+    user_id = get_jwt_identity()
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+    
+    cursor = connection.cursor()
+    query = "DELETE FROM Metas WHERE ID_Meta = %s AND ID_Usuario = %s"
+    cursor.execute(query, (id_meta, user_id))
+    connection.commit()
+    
+    connection.close()
+    return jsonify({"message": "Meta eliminada exitosamente"}), 200
+
+
+
+@app.route('/api/ingresos/mensuales', methods=['GET'])
+@jwt_required()
+def obtener_ingresos_mensuales():
+    user_id = get_jwt_identity()
+    mes = request.args.get('mes')
+    año = request.args.get('año')
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    cursor = connection.cursor(dictionary=True)
+
+    query = """
+    SELECT ID_Ingreso as ID, Descripcion, Monto, Fecha
+    FROM Ingreso
+    WHERE ID_Usuario = %s AND MONTH(Fecha) = %s AND YEAR(Fecha) = %s
+    """
+    cursor.execute(query, (user_id, mes, año))
+    ingresos = cursor.fetchall()
+
+    connection.close()
+    return jsonify(ingresos), 200
+
+
+@app.route('/api/gastos/mensuales', methods=['GET'])
+@jwt_required()
+def obtener_gastos_mensuales():
+    user_id = get_jwt_identity()
+    mes = request.args.get('mes')
+    año = request.args.get('año')
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    cursor = connection.cursor(dictionary=True)
+
+    query = """
+    SELECT ID_Gasto as ID, Descripcion, Monto, Fecha
+    FROM Gasto
+    WHERE ID_Usuario = %s AND MONTH(Fecha) = %s AND YEAR(Fecha) = %s
+    """
+    cursor.execute(query, (user_id, mes, año))
+    gastos = cursor.fetchall()
+
+    connection.close()
+    return jsonify(gastos), 200
+
+@app.route('/api/totales_financieros', methods=['GET'])
+@jwt_required()
+def obtener_totales_financieros():
+    user_id = get_jwt_identity()
+    filters = request.args
+    mes = filters.get('mes')
+    año = filters.get('año')
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    cursor = connection.cursor(dictionary=True)
+
+    # Consulta para obtener los totales de ingresos y gastos por mes
+    query_ingresos = """
+    SELECT 
+        MONTH(Fecha) as mes, 
+        YEAR(Fecha) as año, 
+        SUM(Monto) as total_ingresos
+    FROM Ingreso
+    WHERE ID_Usuario = %s
+    GROUP BY YEAR(Fecha), MONTH(Fecha)
+    ORDER BY YEAR(Fecha), MONTH(Fecha)
+    """
+
+    query_gastos = """
+    SELECT 
+        MONTH(Fecha) as mes, 
+        YEAR(Fecha) as año, 
+        SUM(Monto) as total_gastos
+    FROM Gasto
+    WHERE ID_Usuario = %s
+    GROUP BY YEAR(Fecha), MONTH(Fecha)
+    ORDER BY YEAR(Fecha), MONTH(Fecha)
+    """
+
+    # Ejecutar las consultas y obtener los resultados
+    cursor.execute(query_ingresos, (user_id,))
+    ingresos_por_mes = cursor.fetchall()
+
+    cursor.execute(query_gastos, (user_id,))
+    gastos_por_mes = cursor.fetchall()
+
+    # Combinar los datos de ingresos y gastos en una sola lista
+    monthly_totals = []
+    ingresos_dict = {(ingreso['año'], ingreso['mes']): ingreso['total_ingresos'] for ingreso in ingresos_por_mes}
+    gastos_dict = {(gasto['año'], gasto['mes']): gasto['total_gastos'] for gasto in gastos_por_mes}
+
+    for (año, mes) in set(ingresos_dict.keys()).union(gastos_dict.keys()):
+        monthly_totals.append({
+            'año': año,
+            'mes': mes,
+            'total_ingresos': ingresos_dict.get((año, mes), 0),
+            'total_gastos': gastos_dict.get((año, mes), 0)
+        })
+
+    # Ordenar los resultados por año y mes
+    monthly_totals = sorted(monthly_totals, key=lambda x: (x['año'], x['mes']))
+
+    connection.close()
+    return jsonify(monthly_totals), 200
+
+
+
+@app.route('/api/totales_financieros_mes', methods=['GET'])
+@jwt_required()
+def obtener_totales_financieros_mes():
+    user_id = get_jwt_identity()
+    mes = request.args.get('mes')
+    año = request.args.get('año')
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    cursor = connection.cursor(dictionary=True)
+
+    # Consulta para obtener el total de ingresos para el mes y año seleccionados
+    query_ingresos = """
+    SELECT SUM(Monto) as total_ingresos
+    FROM Ingreso
+    WHERE ID_Usuario = %s AND MONTH(Fecha) = %s AND YEAR(Fecha) = %s
+    """
+    cursor.execute(query_ingresos, (user_id, mes, año))
+    total_ingresos = cursor.fetchone()['total_ingresos'] or 0
+
+    # Consulta para obtener el total de gastos para el mes y año seleccionados
+    query_gastos = """
+    SELECT SUM(Monto) as total_gastos
+    FROM Gasto
+    WHERE ID_Usuario = %s AND MONTH(Fecha) = %s AND YEAR(Fecha) = %s
+    """
+    cursor.execute(query_gastos, (user_id, mes, año))
+    total_gastos = cursor.fetchone()['total_gastos'] or 0
+
+    connection.close()
+
+    return jsonify({"total_ingresos": total_ingresos, "total_gastos": total_gastos}), 200
+
+
+def generate_unique_code(cursor):
+    while True:
+        # Generar un código alfanumérico de 8 caracteres en mayúsculas
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+        # Verificar si el código ya existe en la tabla 'Grupo'
+        cursor.execute("SELECT COUNT(*) as count FROM Grupo WHERE Codigo_Invitacion = %s", (code,))
+        result = cursor.fetchone()
+        if result["count"] == 0:  # Verificamos el conteo usando la clave del diccionario
+            return code
+
+
+@app.route('/api/crear_grupo', methods=['POST'])
+@jwt_required()
+def crear_grupo():
+    data = request.json
+    nombre_grupo = data.get('nombre_grupo')
+    descripcion = data.get('descripcion')
+    miembros = data.get('miembros', [])
+    user_id = get_jwt_identity()  # Obtener el ID del usuario que está creando el grupo
+
+    connection = create_connection()
+    cursor = connection.cursor(dictionary=True)
+    
+    try:
+        # Obtener el correo del usuario que está creando el grupo
+        cursor.execute("SELECT Email FROM Usuario WHERE ID_Usuario = %s", (user_id,))
+        user_data = cursor.fetchone()
+        if not user_data:
+            return jsonify({"error": "Usuario no encontrado"}), 404
+        user_email = user_data["Email"]
+
+        # Generar un código de invitación único
+        codigo_invitacion = generate_unique_code(cursor)
+
+        # Insertar el grupo en la tabla `Grupo`
+        cursor.execute("""
+            INSERT INTO Grupo (Nombre_Grupo, Descripcion, ID_Admin, Codigo_Invitacion)
+            VALUES (%s, %s, %s, %s)
+        """, (nombre_grupo, descripcion, user_id, codigo_invitacion))
+        connection.commit()
+
+        # Obtener el ID del grupo recién creado
+        grupo_id = cursor.lastrowid
+
+        # Insertar al usuario creador como miembro del grupo con su correo
+        cursor.execute("""
+            INSERT INTO Miembro_Grupo (ID_Usuario, ID_Grupo, Email, Confirmado)
+            VALUES (%s, %s, %s, %s)
+        """, (user_id, grupo_id, user_email, 1))  # Confirmado = 1 para el creador del grupo
+        
+        # Procesar los miembros adicionales y enviarles una invitación por correo
+        for email in miembros:
+            cursor.execute("SELECT ID_Usuario FROM Usuario WHERE Email = %s", (email,))
+            usuario = cursor.fetchone()
+            id_usuario = usuario['ID_Usuario'] if usuario else None
+
+            # Insertar el miembro en la tabla Miembro_Grupo con Confirmado = 0
+            cursor.execute("""
+                INSERT INTO Miembro_Grupo (ID_Usuario, ID_Grupo, Email, Confirmado)
+                VALUES (%s, %s, %s, %s)
+            """, (id_usuario, grupo_id, email, 0))
+
+            # Enviar correo de invitación
+            send_invitation_email(email, grupo_id, nombre_grupo)
+
+        connection.commit()
+
+        # Devolver el enlace de invitación
+        invitation_link = f"https://tuapp.com/invite/{codigo_invitacion}"
+        return jsonify({"message": "Grupo creado exitosamente", "invitationLink": invitation_link}), 201
+    
+    except mysql.connector.Error as e:
+        connection.rollback()
+        return jsonify({"error": f"Error al crear el grupo: {str(e)}"}), 500
+    
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def send_invitation_email(email, grupo_id, nombre_grupo):
+    # URL para que el usuario acepte la invitación
+    accept_url = f"http://localhost:5000/api/accept_invitation?grupo_id={grupo_id}&email={email}"
+    msg = Message(
+        subject="Invitación a unirse al grupo financiero",
+        sender="tu_correo@example.com",
+        recipients=[email],
+        body=f"Has sido invitado a unirte al grupo '{nombre_grupo}'. Haz clic en el siguiente enlace para aceptar la invitación:\n{accept_url}"
+    )
+    mail.send(msg)       
+        
+    
+@app.route('/api/accept_invitation', methods=['GET'])
+def accept_invitation():
+    grupo_id = request.args.get('grupo_id')
+    email = request.args.get('email')
+
+    connection = create_connection()
+    cursor = connection.cursor()
+
+    try:
+        # Actualizar el campo Confirmado a 1 para el miembro
+        cursor.execute("""
+            UPDATE Miembro_Grupo
+            SET Confirmado = 1
+            WHERE ID_Grupo = %s AND Email = %s
+        """, (grupo_id, email))
+        connection.commit()
+
+        return jsonify({"message": "Invitación aceptada exitosamente"}), 200
+    
+    except mysql.connector.Error as e:
+        connection.rollback()
+        return jsonify({"error": f"Error al aceptar la invitación: {str(e)}"}), 500
+    
+    finally:
+        cursor.close()
+        connection.close()
 
 
 if __name__ == '__main__':
