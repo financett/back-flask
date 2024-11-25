@@ -1407,9 +1407,10 @@ def obtener_info_grupo(grupo_id):
         # Obtener miembros del grupo
         query_miembros = """
         SELECT u.ID_Usuario, 
-            CONCAT(u.Nombre, ' ', u.Apellido_P, ' ', u.Apellido_M) AS Nombre_Completo, 
-            mg.Email, 
-            mg.Confirmado
+               CONCAT(u.Nombre, ' ', u.Apellido_P, ' ', u.Apellido_M) AS Nombre_Completo, 
+               mg.Email, 
+               u.Contacto,
+               mg.Confirmado
         FROM Miembro_Grupo mg
         LEFT JOIN Usuario u ON mg.ID_Usuario = u.ID_Usuario
         WHERE mg.ID_Grupo = %s
@@ -1437,6 +1438,7 @@ def obtener_info_grupo(grupo_id):
     finally:
         cursor.close()
         connection.close()
+
 
 @app.route('/api/grupo/<int:grupo_id>/info', methods=['GET'])
 @jwt_required()
@@ -1700,6 +1702,108 @@ def registrar_gasto_grupal(grupo_id):
     finally:
         cursor.close()
         connection.close()
+
+@app.route('/api/grupo/metas', methods=['POST'])
+@jwt_required()
+def registrar_meta_grupal():
+    user_id = get_jwt_identity()
+    data = request.json
+
+    descripcion = data.get('descripcion')
+    monto_objetivo = data.get('montoObjetivo')
+    fecha_inicio = data.get('fechaInicio')
+    fecha_limite = data.get('fechaLimite')
+    id_grupo = data.get('idGrupo')
+
+    # Validar campos requeridos
+    if not descripcion or not monto_objetivo or not fecha_inicio or not fecha_limite or not id_grupo:
+        return jsonify({"error": "Faltan datos requeridos"}), 400
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    cursor = connection.cursor(dictionary=True)
+
+    try:
+        # Insertar la meta grupal
+        query = """
+            INSERT INTO Meta_Ahorro_Grupal (Descripcion, Monto_Objetivo, Monto_Actual, Fecha_Inicio, Fecha_Limite, ID_Grupo, ID_Admin)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute(query, (descripcion, monto_objetivo, 0, fecha_inicio, fecha_limite, id_grupo, user_id))
+        connection.commit()
+
+        return jsonify({"message": "Meta grupal registrada exitosamente"}), 201
+
+    except Exception as e:
+        connection.rollback()
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        cursor.close()
+        connection.close()
+
+
+@app.route('/api/grupo/<int:grupo_id>/metas', methods=['GET'])
+@jwt_required()
+def obtener_metas_grupales(grupo_id):
+    """
+    Endpoint para obtener todas las metas grupales de un grupo específico.
+    """
+    user_id = get_jwt_identity()
+
+    # Conexión a la base de datos
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    cursor = connection.cursor(dictionary=True)
+
+    try:
+        # Verificar si el usuario pertenece al grupo y está confirmado
+        query_verificar = """
+        SELECT Confirmado
+        FROM Miembro_Grupo
+        WHERE ID_Usuario = %s AND ID_Grupo = %s AND Confirmado = 1
+        """
+        cursor.execute(query_verificar, (user_id, grupo_id))
+        miembro = cursor.fetchone()
+
+        if not miembro:
+            return jsonify({"error": "No tienes acceso a este grupo"}), 403
+
+        # Obtener las metas grupales
+        query_metas = """
+        SELECT 
+            ID_Ahorro_Grupal,
+            Descripcion,
+            Monto_Objetivo,
+            Monto_Actual,
+            Fecha_Inicio,
+            Fecha_Limite
+        FROM Meta_Ahorro_Grupal
+        WHERE ID_Grupo = %s
+        """
+        cursor.execute(query_metas, (grupo_id,))
+        metas = cursor.fetchall()
+
+        # Añadir estatus de ahorro a las metas
+        for meta in metas:
+            if meta['Monto_Actual'] == meta['Monto_Objetivo']:
+                meta['Estatus'] = 'Completado'
+            else:
+                meta['Estatus'] = 'En curso'
+
+        return jsonify(metas), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Error al obtener metas grupales: {str(e)}"}), 500
+
+    finally:
+        cursor.close()
+        connection.close()
+
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000, debug=True)
