@@ -584,7 +584,6 @@ def agregar_gasto():
     id_subcategoria = data.get('id_subcategoria')  # Asegurarse de que sea un ID
     periodicidad = data.get('periodicidad', None)  # Se espera como None si es único
     periodico = data.get('periodico', 1)  # Por defecto, asumir que es periódico
-    id_grupo = data.get('id_grupo', None)
 
     # Validación de la fecha, si no está en el payload, se usa la fecha actual
     if fecha:
@@ -608,8 +607,8 @@ def agregar_gasto():
 
     # Si es único, periodicidad será NULL
     query = """
-    INSERT INTO Gasto (Descripcion, Monto, Fecha, Categoria, ID_Subcategoria, Periodico, ID_Usuario, ID_Grupo, Periodicidad)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO Gasto (Descripcion, Monto, Fecha, Categoria, ID_Subcategoria, Periodico, ID_Usuario, Periodicidad)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """
     cursor.execute(query, (
         descripcion,
@@ -619,7 +618,6 @@ def agregar_gasto():
         id_subcategoria,
         periodico,
         id_usuario,
-        id_grupo,
         periodicidad if periodico == 1 else None  # Almacena periodicidad solo si es periódico
     ))
 
@@ -627,6 +625,7 @@ def agregar_gasto():
     connection.close()
 
     return jsonify({"message": "Gasto registrado con éxito"}), 201
+
 
 
 
