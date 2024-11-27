@@ -10,6 +10,8 @@ from itsdangerous import URLSafeTimedSerializer, SignatureExpired
 import secrets
 import random
 import string
+from flask_jwt_extended import create_access_token, get_jwt_identity
+from flask import make_response
 
 
 
@@ -19,6 +21,7 @@ CORS(app)  # Habilitar CORS para todas las rutas y dominios
 # Configuración de claves secretas para Flask y JWT
 app.config['SECRET_KEY'] = secrets.token_urlsafe(16)  # Clave para Flask (session)
 app.config['JWT_SECRET_KEY'] = secrets.token_urlsafe(32)  # Clave para JWT
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=15)  # 15 minutos
 
 # Configuración de Flask-Mail
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'  # Cambia esto según tu servidor de correo
@@ -34,6 +37,33 @@ jwt = JWTManager(app)
 
 # Serializador para la creación de tokens de verificación de email
 s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
+
+def jwt_refresh_if_active(fn):
+    @jwt_required()  # Requiere un token válido
+    def wrapper(*args, **kwargs):
+        # Ejecutar la función original del endpoint
+        response = fn(*args, **kwargs)
+        
+        # Obtener la identidad actual
+        current_user = get_jwt_identity()
+        new_access_token = create_access_token(identity=current_user)
+        
+        # Si la respuesta es una tupla, separa sus componentes
+        if isinstance(response, tuple):
+            data = response[0]  # Contenido de la respuesta
+            status_code = response[1] if len(response) > 1 else 200
+            headers = response[2] if len(response) > 2 else {}
+        else:
+            data = response
+            status_code = 200
+            headers = {}
+
+        # Agregar el nuevo token al encabezado
+        headers["Authorization"] = f"Bearer {new_access_token}"
+        
+        # Usar make_response para crear la respuesta completa
+        return make_response(data, status_code, headers)
+    return wrapper
 
 def create_connection():
     connection = None
@@ -268,7 +298,7 @@ def confirm_email(token):
     ''', 200
 
 @app.route('/api/ingreso', methods=['POST'])
-@jwt_required()
+@jwt_refresh_if_active
 def agregar_ingreso():
     data = request.json
     id_usuario = get_jwt_identity()  # Obtener el ID del usuario desde el token JWT
@@ -393,8 +423,8 @@ def agregar_ingreso():
 
 
 # RUTA PARA OBTENER INGRESOS FILTRADOS
-@app.route('/api/income/filtered', methods=['POST'])
-@jwt_required()
+@app.route('/api/income/filtered', methods=['POST'], endpoint='filtrar_ingresos')
+@jwt_refresh_if_active
 def obtener_ingresos_filtrados():
     user_id = get_jwt_identity()  # Obtener el ID del usuario desde el token JWT
     data = request.json
@@ -445,8 +475,8 @@ def obtener_ingresos_filtrados():
     return jsonify(ingresos), 200
 
 # RUTA PARA OBTENER INGRESOS PARA TABLA
-@app.route('/api/user/incomes', methods=['GET'])
-@jwt_required()
+@app.route('/api/user/incomes', methods=['GET'], endpoint='Ingresos_tabla')
+@jwt_refresh_if_active
 def get_user_incomes():
     user_id = get_jwt_identity()
 
@@ -474,8 +504,8 @@ def get_user_incomes():
 
 
 # RUTA PARA ELIMINAR INGRESOS 
-@app.route('/api/user/incomes/<int:income_id>', methods=['DELETE'])
-@jwt_required()
+@app.route('/api/user/incomes/<int:income_id>', methods=['DELETE'], endpoint='eliminar_ingreso')
+@jwt_refresh_if_active
 def delete_income(income_id):
     user_id = get_jwt_identity()
 
@@ -507,8 +537,8 @@ def delete_income(income_id):
     return jsonify({"message": "Ingreso eliminado exitosamente."}), 200
 
 
-@app.route('/api/user/update_income/<int:id_ingreso>', methods=['PUT'])
-@jwt_required()
+@app.route('/api/user/update_income/<int:id_ingreso>', methods=['PUT'], endpoint='actualizar_ingreso')
+@jwt_refresh_if_active
 def update_income(id_ingreso):
     user_id = get_jwt_identity()
     data = request.json
@@ -544,8 +574,8 @@ def update_income(id_ingreso):
 
 
 
-@app.route('/api/user/income/<int:id_ingreso>', methods=['GET'])
-@jwt_required()
+@app.route('/api/user/income/<int:id_ingreso>', methods=['GET'], endpoint='obtener_ingreso_act')
+@jwt_refresh_if_active
 def get_income_by_id(id_ingreso):
     user_id = get_jwt_identity()
 
@@ -570,8 +600,8 @@ def get_income_by_id(id_ingreso):
         return jsonify({"error": "Ingreso no encontrado"}), 404
     
 
-@app.route('/api/gasto', methods=['POST'])
-@jwt_required()
+@app.route('/api/gasto', methods=['POST'], endpoint='registrar_gasto')
+@jwt_refresh_if_active
 def agregar_gasto():
     data = request.json
     print("Datos recibidos en el backend para gasto:", data)  # Para verificar el payload en consola
@@ -630,8 +660,8 @@ def agregar_gasto():
 
 
 
-@app.route('/api/user/gastos', methods=['GET'])
-@jwt_required()
+@app.route('/api/user/gastos', methods=['GET'], endpoint='obtener_Gastos')
+@jwt_refresh_if_active
 def obtener_gastos_usuario():
     id_usuario = get_jwt_identity()  # Obtener el ID del usuario desde el token JWT
 
@@ -677,8 +707,8 @@ def obtener_gastos_usuario():
 
 
 
-@app.route('/api/gasto/<int:id_gasto>', methods=['PUT'])
-@jwt_required()
+@app.route('/api/gasto/<int:id_gasto>', methods=['PUT'], endpoint='actualizar_gasto')
+@jwt_refresh_if_active
 def actualizar_gasto(id_gasto):
     data = request.json
     id_usuario = get_jwt_identity()  # Obtener el ID del usuario desde el token JWT
@@ -715,8 +745,8 @@ def actualizar_gasto(id_gasto):
 
 
 
-@app.route('/api/gasto/<int:id_gasto>', methods=['DELETE'])
-@jwt_required()
+@app.route('/api/gasto/<int:id_gasto>', methods=['DELETE'], endpoint='eliminar_gasto')
+@jwt_refresh_if_active
 def eliminar_gasto(id_gasto):
     id_usuario = get_jwt_identity()  # Obtener el ID del usuario desde el token JWT
 
@@ -740,8 +770,8 @@ def eliminar_gasto(id_gasto):
 
 
 
-@app.route('/api/gasto/filtered', methods=['POST'])
-@jwt_required()
+@app.route('/api/gasto/filtered', methods=['POST'], endpoint='gasto_componente_obtener')
+@jwt_refresh_if_active
 def filtrar_gastos_usuario():
     data = request.json
     id_usuario = get_jwt_identity()  # Obtener el ID del usuario desde el token JWT
@@ -802,8 +832,8 @@ def filtrar_gastos_usuario():
 
 
 
-@app.route('/api/subcategorias/<string:categoria>', methods=['GET'])
-@jwt_required()
+@app.route('/api/subcategorias/<string:categoria>', methods=['GET'], endpoint='subcategoria_asto')
+@jwt_refresh_if_active
 def obtener_subcategorias(categoria):
     connection = create_connection()
     if connection is None:
@@ -822,8 +852,8 @@ def obtener_subcategorias(categoria):
     return jsonify(subcategorias), 200
 
     # Obtener metas financieras
-@app.route('/api/metas', methods=['GET'])
-@jwt_required()
+@app.route('/api/metas', methods=['GET'], endpoint='obtener_metas')
+@jwt_refresh_if_active
 def obtener_metas():
     user_id = get_jwt_identity()
     connection = create_connection()
@@ -855,8 +885,8 @@ def obtener_metas():
 
 
 #Crear metas
-@app.route('/api/metas', methods=['POST'])
-@jwt_required()
+@app.route('/api/metas', methods=['POST'], endpoint='crear_meta')
+@jwt_refresh_if_active
 def crear_meta():
     user_id = get_jwt_identity()
     data = request.json
@@ -884,8 +914,8 @@ def crear_meta():
 
 
 
-@app.route('/api/validar-ingresos-gastos', methods=['GET'])
-@jwt_required()
+@app.route('/api/validar-ingresos-gastos', methods=['GET'], endpoint='Promedio_gastos_ingresos')
+@jwt_refresh_if_active
 def validar_ingresos_gastos():
     user_id = get_jwt_identity()
     connection = create_connection()
@@ -911,8 +941,8 @@ def validar_ingresos_gastos():
     else:
         return jsonify({"valido": False}), 200
 
-@app.route('/api/promedios', methods=['GET'])
-@jwt_required()
+@app.route('/api/promedios', methods=['GET'], endpoint='Promedios_total')
+@jwt_refresh_if_active
 def obtener_promedios():
     user_id = get_jwt_identity()
     connection = create_connection()
@@ -943,8 +973,8 @@ def obtener_promedios():
     }), 200
 
 # Eliminar meta financiera
-@app.route('/api/metas/<int:id_meta>', methods=['DELETE'])
-@jwt_required()
+@app.route('/api/metas/<int:id_meta>', methods=['DELETE'], endpoint='eliminar_metas')
+@jwt_refresh_if_active
 def eliminar_meta(id_meta):
     user_id = get_jwt_identity()
     connection = create_connection()
@@ -974,8 +1004,8 @@ def eliminar_meta(id_meta):
 
 
 
-@app.route('/api/ingresos/mensuales', methods=['GET'])
-@jwt_required()
+@app.route('/api/ingresos/mensuales', methods=['GET'], endpoint='Ingreso_mensual')
+@jwt_refresh_if_active
 def obtener_ingresos_mensuales():
     user_id = get_jwt_identity()
     mes = request.args.get('mes')
@@ -999,8 +1029,8 @@ def obtener_ingresos_mensuales():
     return jsonify(ingresos), 200
 
 
-@app.route('/api/gastos/mensuales', methods=['GET'])
-@jwt_required()
+@app.route('/api/gastos/mensuales', methods=['GET'], endpoint='Gastos_mensuales')
+@jwt_refresh_if_active
 def obtener_gastos_mensuales():
     user_id = get_jwt_identity()
     mes = request.args.get('mes')
@@ -1023,8 +1053,8 @@ def obtener_gastos_mensuales():
     connection.close()
     return jsonify(gastos), 200
 
-@app.route('/api/totales_financieros', methods=['GET'])
-@jwt_required()
+@app.route('/api/totales_financieros', methods=['GET'], endpoint='totales_financieros')
+@jwt_refresh_if_active
 def obtener_totales_financieros():
     user_id = get_jwt_identity()
     filters = request.args
@@ -1088,8 +1118,8 @@ def obtener_totales_financieros():
 
 
 
-@app.route('/api/totales_financieros_mes', methods=['GET'])
-@jwt_required()
+@app.route('/api/totales_financieros_mes', methods=['GET'], endpoint='Financieros_mes')
+@jwt_refresh_if_active
 def obtener_totales_financieros_mes():
     user_id = get_jwt_identity()
     mes = request.args.get('mes')
@@ -1135,8 +1165,8 @@ def generate_unique_code(cursor):
             return code
 
 
-@app.route('/api/crear_grupo', methods=['POST'])
-@jwt_required()
+@app.route('/api/crear_grupo', methods=['POST'], endpoint='Crear_grupo')
+@jwt_refresh_if_active
 def crear_grupo():
     data = request.json
     nombre_grupo = data.get('nombre_grupo')
@@ -1204,8 +1234,8 @@ def crear_grupo():
         connection.close()
 
 # Registrar una nueva transacción para una meta
-@app.route('/api/metas/<int:id_meta>/transacciones', methods=['POST'])
-@jwt_required()
+@app.route('/api/metas/<int:id_meta>/transacciones', methods=['POST'], endpoint='registrar_transaccion_meta')
+@jwt_refresh_if_active
 def registrar_transaccion(id_meta):
     user_id = get_jwt_identity()
     data = request.json
@@ -1229,8 +1259,8 @@ def registrar_transaccion(id_meta):
 
 
 
-@app.route('/api/metas/<int:id_meta>', methods=['GET'])
-@jwt_required()
+@app.route('/api/metas/<int:id_meta>', methods=['GET'], endpoint='obtener_metas2')
+@jwt_refresh_if_active
 def obtener_meta(id_meta):
     user_id = get_jwt_identity()
     connection = create_connection()
@@ -1268,8 +1298,8 @@ def obtener_meta(id_meta):
     return jsonify(meta), 200
 
 
-@app.route('/api/metas/<int:id_meta>/transacciones', methods=['GET'])
-@jwt_required()
+@app.route('/api/metas/<int:id_meta>/transacciones', methods=['GET'], endpoint='obtener_transacciones_meta')
+@jwt_refresh_if_active
 def obtener_transacciones(id_meta):
     user_id = get_jwt_identity()
     connection = create_connection()
@@ -1334,8 +1364,8 @@ def accept_invitation():
 
 
 
-@app.route('/api/grupos', methods=['GET'])
-@jwt_required()
+@app.route('/api/grupos', methods=['GET'], endpoint='obtener_grupos')
+@jwt_refresh_if_active
 def obtener_grupos_usuario():
     user_id = get_jwt_identity()
 
@@ -1365,8 +1395,8 @@ def obtener_grupos_usuario():
 
     return jsonify(grupos), 200
 
-@app.route('/api/grupo/<int:grupo_id>', methods=['GET'])
-@jwt_required()
+@app.route('/api/grupo/<int:grupo_id>', methods=['GET'], endpoint='obtener_grpo1')
+@jwt_refresh_if_active
 def obtener_info_grupo(grupo_id):
     user_id = get_jwt_identity()
 
@@ -1440,8 +1470,8 @@ def obtener_info_grupo(grupo_id):
         connection.close()
 
 
-@app.route('/api/grupo/<int:grupo_id>/info', methods=['GET'])
-@jwt_required()
+@app.route('/api/grupo/<int:grupo_id>/info', methods=['GET'], endpoint='info_grupo')
+@jwt_refresh_if_active
 def obtener_info_basica_grupo(grupo_id):
     """
     Endpoint para obtener información básica de un grupo (nombre y descripción) 
@@ -1489,8 +1519,8 @@ def obtener_info_basica_grupo(grupo_id):
         cursor.close()
         connection.close()
 
-@app.route('/api/grupo/<int:grupo_id>/gastos', methods=['GET'])
-@jwt_required()
+@app.route('/api/grupo/<int:grupo_id>/gastos', methods=['GET'], endpoint='obtener_gastos_grupo')
+@jwt_refresh_if_active
 def obtener_gastos_grupo(grupo_id):
     """
     Endpoint para obtener los gastos de un grupo específico.
@@ -1554,8 +1584,8 @@ def obtener_gastos_grupo(grupo_id):
         connection.close()
 
 
-@app.route('/api/grupo/<int:grupo_id>/gastos/filtrados', methods=['POST'])
-@jwt_required()
+@app.route('/api/grupo/<int:grupo_id>/gastos/filtrados', methods=['POST'], endpoint='obtener_gasto_grupo_filtado')
+@jwt_refresh_if_active
 def obtener_gastos_grupales_filtrados(grupo_id):
     """
     Endpoint para obtener datos de los gastos grupales filtrados, agrupados por descripción
@@ -1626,8 +1656,8 @@ def obtener_gastos_grupales_filtrados(grupo_id):
         connection.close()
 
 
-@app.route('/api/grupo/<int:grupo_id>/registrar-gasto', methods=['POST'])
-@jwt_required()
+@app.route('/api/grupo/<int:grupo_id>/registrar-gasto', methods=['POST'], endpoint='gasto_grupal')
+@jwt_refresh_if_active
 def registrar_gasto_grupal(grupo_id):
     """
     Endpoint para registrar un gasto grupal.
@@ -1703,8 +1733,8 @@ def registrar_gasto_grupal(grupo_id):
         cursor.close()
         connection.close()
 
-@app.route('/api/grupo/metas', methods=['POST'])
-@jwt_required()
+@app.route('/api/grupo/metas', methods=['POST'], endpoint='metas_grupales')
+@jwt_refresh_if_active
 def registrar_meta_grupal():
     user_id = get_jwt_identity()
     data = request.json
@@ -1745,8 +1775,8 @@ def registrar_meta_grupal():
         connection.close()
 
 
-@app.route('/api/grupo/<int:grupo_id>/metas', methods=['GET'])
-@jwt_required()
+@app.route('/api/grupo/<int:grupo_id>/metas', methods=['GET'], endpoint='info_meta_grupal')
+@jwt_refresh_if_active
 def obtener_metas_grupales(grupo_id):
     """
     Endpoint para obtener todas las metas grupales de un grupo específico.
@@ -1799,6 +1829,66 @@ def obtener_metas_grupales(grupo_id):
 
     except Exception as e:
         return jsonify({"error": f"Error al obtener metas grupales: {str(e)}"}), 500
+
+    finally:
+        cursor.close()
+        connection.close()
+
+
+
+@app.route('/api/grupo/<int:grupo_id>/agregar-miembros', methods=['POST'], endpoint='agregar_miembro_grupo')
+@jwt_refresh_if_active
+def agregar_miembros_grupo(grupo_id):
+    """
+    Endpoint para agregar nuevos miembros a un grupo existente.
+    """
+    user_id = get_jwt_identity()
+    data = request.json
+    nuevos_miembros = data.get('miembros', [])
+
+    if not nuevos_miembros:
+        return jsonify({"error": "No se proporcionaron correos electrónicos."}), 400
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    cursor = connection.cursor(dictionary=True)
+
+    try:
+        # Verificar que el usuario sea administrador del grupo
+        query_admin = "SELECT ID_Admin, Nombre_Grupo FROM Grupo WHERE ID_Grupo = %s"
+        cursor.execute(query_admin, (grupo_id,))
+        grupo = cursor.fetchone()
+
+        if not grupo or grupo['ID_Admin'] != user_id:
+            return jsonify({"error": "No tienes permisos para realizar esta acción"}), 403
+
+        nombre_grupo = grupo['Nombre_Grupo']
+
+        # Procesar los nuevos miembros
+        for email in nuevos_miembros:
+            # Verificar si el usuario ya existe
+            cursor.execute("SELECT ID_Usuario FROM Usuario WHERE Email = %s", (email,))
+            usuario = cursor.fetchone()
+            id_usuario = usuario['ID_Usuario'] if usuario else None
+
+            # Insertar miembro en la tabla Miembro_Grupo
+            cursor.execute("""
+                INSERT INTO Miembro_Grupo (ID_Usuario, ID_Grupo, Email, Confirmado)
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE Confirmado = 0
+            """, (id_usuario, grupo_id, email, 0))
+
+            # Enviar correo de invitación
+            send_invitation_email(email, grupo_id, nombre_grupo)
+
+        connection.commit()
+        return jsonify({"message": "Miembros añadidos exitosamente. Se han enviado las invitaciones."}), 201
+
+    except Exception as e:
+        connection.rollback()
+        return jsonify({"error": f"Error al agregar miembros: {str(e)}"}), 500
 
     finally:
         cursor.close()
