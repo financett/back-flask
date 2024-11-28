@@ -1895,5 +1895,82 @@ def agregar_miembros_grupo(grupo_id):
         connection.close()
 
 
+@app.route('/api/gasto/<int:id_gasto>', methods=['GET'], endpoint='obtener_gasto_edit')
+@jwt_refresh_if_active
+def obtener_gasto(id_gasto):
+    user_id = get_jwt_identity()
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    cursor = connection.cursor(dictionary=True)
+    query = """
+    SELECT ID_Gasto, Descripcion, Monto, Periodicidad, Categoria, Fecha, Periodico, ID_Subcategoria
+    FROM Gasto
+    WHERE ID_Gasto = %s AND ID_Usuario = %s
+    """
+    cursor.execute(query, (id_gasto, user_id))
+    gasto = cursor.fetchone()
+
+    connection.close()
+
+    if gasto:
+        return jsonify(gasto), 200
+    else:
+        return jsonify({"error": "Gasto no encontrado"}), 404
+
+    
+
+
+@app.route('/api/gasto/actualizar/<int:id_gasto>', methods=['PUT'], endpoint='actualizar_gasto_edit')
+@jwt_refresh_if_active
+def actualizar_gasto(id_gasto):
+    """
+    Endpoint para actualizar un gasto existente en la base de datos.
+    """
+    user_id = get_jwt_identity()
+    data = request.json
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor()
+        query = """
+        UPDATE Gasto
+        SET Descripcion = %s, 
+            Monto = %s, 
+            Periodicidad = %s, 
+            Categoria = %s, 
+            Fecha = %s, 
+            Periodico = %s, 
+            ID_Subcategoria = %s
+        WHERE ID_Gasto = %s AND ID_Usuario = %s
+        """
+        cursor.execute(query, (
+            data.get('descripcion'),
+            data.get('monto'),
+            data.get('periodicidad'),
+            data.get('categoria'),
+            data.get('fecha'),
+            data.get('periodico'),
+            data.get('id_subcategoria'),
+            id_gasto,
+            user_id
+        ))
+
+        connection.commit()
+        return jsonify({"message": "Gasto actualizado con éxito"}), 200
+
+    except Exception as e:
+        app.logger.error("Error al actualizar el gasto: %s", str(e))
+        return jsonify({"error": "Error al actualizar el gasto"}), 500
+
+    finally:
+        connection.close()
+
+
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000, debug=True)
