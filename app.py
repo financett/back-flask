@@ -16,7 +16,6 @@ from flask import make_response
 
 
 
-
 app = Flask(__name__)
 CORS(app)  # Habilitar CORS para todas las rutas y dominios
 
@@ -2557,7 +2556,144 @@ def change_password():
     finally:
         connection.close()
 
+@app.route('/api/grupo/<int:grupo_id>', methods=['DELETE'], endpoint='delete_group')
+@jwt_refresh_if_active
+def delete_group(grupo_id):
+    """
+    Endpoint para eliminar un grupo por su ID.
+    """
+    user_id = get_jwt_identity()  # Usuario autenticado
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+
+        # Verificar si el usuario es el administrador del grupo
+        query_check_admin = "SELECT ID_Admin FROM Grupo WHERE ID_Grupo = %s"
+        cursor.execute(query_check_admin, (grupo_id,))
+        result = cursor.fetchone()
+
+        if not result or result['ID_Admin'] != user_id:
+            return jsonify({"error": "No tienes permiso para eliminar este grupo"}), 403
+
+        # Eliminar el grupo
+        query_delete_group = "DELETE FROM Grupo WHERE ID_Grupo = %s"
+        cursor.execute(query_delete_group, (grupo_id,))
+        connection.commit()
+
+        return jsonify({"message": "Grupo eliminado exitosamente"}), 200
+
+    except Exception as e:
+        connection.rollback()
+        return jsonify({"error": f"Error al eliminar el grupo: {str(e)}"}), 500
+
+    finally:
+        connection.close()
+
+
+@app.route('/api/grupo/<int:grupo_id>/cambiar-admin', methods=['PUT'], endpoint='change_admin')
+@jwt_refresh_if_active
+def change_admin(grupo_id):
+    """
+    Endpoint para cambiar el administrador de un grupo.
+    """
+    user_id = get_jwt_identity()  # Obtener el ID del usuario autenticado
+    data = request.json
+    new_admin_id = data.get('new_admin_id')
+
+    if not new_admin_id:
+        return jsonify({"error": "El ID del nuevo administrador es obligatorio."}), 400
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+
+        # Verificar si el usuario autenticado es el administrador actual del grupo
+        query_check_admin = "SELECT ID_Admin FROM Grupo WHERE ID_Grupo = %s"
+        cursor.execute(query_check_admin, (grupo_id,))
+        grupo = cursor.fetchone()
+
+        if not grupo:
+            return jsonify({"error": "El grupo no existe."}), 404
+
+        if grupo['ID_Admin'] != user_id:
+            return jsonify({"error": "No tienes permisos para cambiar el administrador del grupo."}), 403
+
+        # Verificar que el nuevo administrador es un miembro confirmado del grupo
+        query_check_member = """
+        SELECT ID_Usuario 
+        FROM Miembro_Grupo 
+        WHERE ID_Grupo = %s AND ID_Usuario = %s AND Confirmado = 1
+        """
+        cursor.execute(query_check_member, (grupo_id, new_admin_id))
+        miembro = cursor.fetchone()
+
+        if not miembro:
+            return jsonify({"error": "El nuevo administrador debe ser un miembro confirmado del grupo."}), 400
+
+        # Actualizar el administrador del grupo
+        query_update_admin = "UPDATE Grupo SET ID_Admin = %s WHERE ID_Grupo = %s"
+        cursor.execute(query_update_admin, (new_admin_id, grupo_id))
+        connection.commit()
+
+        return jsonify({"message": "El administrador del grupo ha sido actualizado exitosamente."}), 200
+
+    except Exception as e:
+        connection.rollback()
+        return jsonify({"error": f"Error al cambiar el administrador: {str(e)}"}), 500
+
+    finally:
+        if 'connection' in locals() and connection is not None:
+            connection.close()
+
+@app.route('/api/grupo/<int:grupo_id>/salir', methods=['DELETE'], endpoint='salir_grupo')
+@jwt_required()
+def salir_grupo(grupo_id):
+    """
+    Endpoint para que un usuario salga de un grupo.
+    """
+    user_id = get_jwt_identity()  # Obtener el ID del usuario autenticado
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+
+        # Verificar si el usuario es administrador
+        query_check_admin = "SELECT ID_Admin FROM Grupo WHERE ID_Grupo = %s"
+        cursor.execute(query_check_admin, (grupo_id,))
+        group = cursor.fetchone()
+
+        if not group:
+            return jsonify({"error": "El grupo no existe."}), 404
+
+        if group['ID_Admin'] == user_id:
+            return jsonify({"error": "El administrador no puede abandonar el grupo."}), 403
+
+        # Eliminar al usuario de la tabla Miembro_Grupo
+        query_delete_member = "DELETE FROM Miembro_Grupo WHERE ID_Usuario = %s AND ID_Grupo = %s"
+        cursor.execute(query_delete_member, (user_id, grupo_id))
+        connection.commit()
+
+        return jsonify({"message": "Has salido del grupo exitosamente."}), 200
+
+    except Exception as e:
+        connection.rollback()
+        return jsonify({"error": f"Error al salir del grupo: {str(e)}"}), 500
+
+    finally:
+        connection.close()
+
 
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000, debug=True)
+
+
