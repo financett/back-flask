@@ -13,9 +13,6 @@ import string
 from flask_jwt_extended import create_access_token, get_jwt_identity
 from flask import make_response
 
-
-
-
 app = Flask(__name__)
 CORS(app)  # Habilitar CORS para todas las rutas y dominios
 
@@ -2692,8 +2689,153 @@ def salir_grupo(grupo_id):
         connection.close()
 
 
+@app.route('/api/grupo/unirse', methods=['POST'], endpoint='unirse_grupo')
+@jwt_refresh_if_active
+def unirse_grupo():
+    # Obtener datos del cuerpo de la solicitud
+    data = request.json
+    codigo_invitacion = data.get('codigo_invitacion')
+    user_id = get_jwt_identity()
+
+    if not codigo_invitacion:
+        return jsonify({"error": "El código de invitación es obligatorio."}), 400
+
+    # Crear conexión a la base de datos
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos."}), 500
+
+    cursor = connection.cursor(dictionary=True)
+
+    try:
+        # Obtener el email del usuario autenticado
+        query_user = "SELECT Email FROM Usuario WHERE ID_Usuario = %s"
+        cursor.execute(query_user, (user_id,))
+        user = cursor.fetchone()
+
+        if not user:
+            return jsonify({"error": "No se encontró información del usuario autenticado."}), 404
+
+        email_usuario = user['Email']
+
+        # Verificar si el grupo con el código de invitación existe
+        query_grupo = "SELECT * FROM Grupo WHERE Codigo_Invitacion = %s"
+        cursor.execute(query_grupo, (codigo_invitacion,))
+        grupo = cursor.fetchone()
+
+        if not grupo:
+            return jsonify({"error": "El código de invitación no es válido."}), 404
+
+        # Verificar si el usuario ya es miembro del grupo
+        query_miembro = """
+        SELECT * FROM Miembro_Grupo 
+        WHERE ID_Usuario = %s AND ID_Grupo = %s
+        """
+        cursor.execute(query_miembro, (user_id, grupo['ID_Grupo']))
+        miembro_existente = cursor.fetchone()
+
+        if miembro_existente:
+            return jsonify({"error": "Ya eres miembro de este grupo."}), 400
+
+        # Insertar al usuario en la tabla Miembro_Grupo con Confirmado = 0 y su email
+        query_insert = """
+        INSERT INTO Miembro_Grupo (ID_Usuario, ID_Grupo, Email, Confirmado)
+        VALUES (%s, %s, %s, %s)
+        """
+        cursor.execute(query_insert, (user_id, grupo['ID_Grupo'], email_usuario, 0))
+        connection.commit()
+
+        # Obtener información del administrador del grupo
+        query_admin = "SELECT Email, Nombre FROM Usuario WHERE ID_Usuario = %s"
+        cursor.execute(query_admin, (grupo['ID_Admin'],))
+        admin = cursor.fetchone()
+
+        if not admin:
+            return jsonify({"error": "No se pudo encontrar al administrador del grupo."}), 500
+
+        # Enviar correo al administrador del grupo
+        try:
+            # Cambiar miembro_id por ID_Grupo e ID_Usuario
+            aceptar_url = f"http://127.0.0.1:5000/api/grupo/aceptar_solicitud?ID_Grupo={grupo['ID_Grupo']}&ID_Usuario={user_id}"
+            msg = Message(
+                subject="Solicitud para unirse a tu grupo",
+                sender="fianzastt@gmail.com",
+                recipients=[admin['Email']],
+            )
+            msg.body = f"""
+            Hola {admin['Nombre']},
+
+            El usuario con correo {email_usuario} ha solicitado unirse al grupo '{grupo['Nombre_Grupo']}'.
+
+            Haz clic en el siguiente enlace para aceptar la solicitud:
+            {aceptar_url}
+            """
+            mail.send(msg)
+        except Exception as e:
+            print(f"Error al enviar el correo: {str(e)}")
+            return jsonify({"error": "No se pudo enviar el correo al administrador."}), 500
+
+        return jsonify({"message": "Solicitud enviada. El administrador revisará tu solicitud."}), 201
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return jsonify({"error": "Error interno del servidor."}), 500
+
+    finally:
+        cursor.close()
+        connection.close()
+
+
+
+
+@app.route('/api/grupo/aceptar_solicitud', methods=['GET'], endpoint='aceptar_solicitud')
+def aceptar_solicitud():
+    id_grupo = request.args.get('ID_Grupo')
+    id_usuario = request.args.get('ID_Usuario')
+
+    if not id_grupo or not id_usuario:
+        return jsonify({"error": "ID del grupo y ID del usuario son obligatorios."}), 400
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos."}), 500
+
+    cursor = connection.cursor()
+
+    try:
+        # Validar que el usuario ya está registrado en el grupo
+        query_validate = """
+        SELECT * FROM Miembro_Grupo
+        WHERE ID_Usuario = %s AND ID_Grupo = %s
+        """
+        cursor.execute(query_validate, (id_usuario, id_grupo))
+        miembro = cursor.fetchone()
+
+        if not miembro:
+            return jsonify({"error": "El usuario no está registrado en este grupo."}), 404
+
+        # Actualizar el campo Confirmado a 1
+        query_update = """
+        UPDATE Miembro_Grupo
+        SET Confirmado = 1
+        WHERE ID_Usuario = %s AND ID_Grupo = %s
+        """
+        cursor.execute(query_update, (id_usuario, id_grupo))
+        connection.commit()
+
+        return jsonify({"message": "Solicitud aceptada exitosamente."}), 200
+
+    except Exception as e:
+        connection.rollback()
+        print(f"Error al aceptar la solicitud: {str(e)}")
+        return jsonify({"error": f"Error interno del servidor: {str(e)}"}), 500
+
+    finally:
+        cursor.close()
+        connection.close()
+
+
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000, debug=True)
-
 
