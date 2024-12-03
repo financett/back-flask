@@ -1403,14 +1403,28 @@ def obtener_transacciones(id_meta):
 
 def send_invitation_email(email, grupo_id, nombre_grupo):
     # URL para que el usuario acepte la invitación
-    accept_url = f"https://front-prod-4r8v.onrender.com//api/accept_invitation?grupo_id={grupo_id}&email={email}"
+    accept_url = f"https://back-flask-production.up.railway.app/api/accept_invitation?grupo_id={grupo_id}&email={email}"
     msg = Message(
         subject="Invitación a unirse al grupo financiero",
         sender="tu_correo@example.com",
-        recipients=[email],
-        body=f"Has sido invitado a unirte al grupo '{nombre_grupo}'. Haz clic en el siguiente enlace para aceptar la invitación:\n{accept_url}"
+        recipients=[email]
     )
-    mail.send(msg)       
+    
+    # Cuerpo del correo en texto plano
+    msg.body = f"""
+    Has sido invitado a unirte al grupo '{nombre_grupo}'.
+    Haz clic en el siguiente enlace para aceptar la invitación:
+    {accept_url}
+    """
+    
+    # Cuerpo del correo en HTML
+    msg.html = f"""
+    <p>Has sido invitado a unirte al grupo <strong>{nombre_grupo}</strong>.</p>
+    <p>Haz clic <a href="{accept_url}">AQUI</a> para aceptar la invitación.</p>
+    """
+    
+    mail.send(msg)
+    
         
     
 @app.route('/api/accept_invitation', methods=['GET'])
