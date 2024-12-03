@@ -16,6 +16,8 @@ from flask import make_response
 app = Flask(__name__)
 CORS(app)  # Habilitar CORS para todas las rutas y dominios
 
+verification_codes = {}  # Diccionario para almacenar los códigos
+
 # Configuración de claves secretas para Flask y JWT
 app.config['SECRET_KEY'] = secrets.token_urlsafe(16)  # Clave para Flask (session)
 app.config['JWT_SECRET_KEY'] = secrets.token_urlsafe(32)  # Clave para JWT
@@ -249,7 +251,12 @@ def register():
 
         # Enviar correo de verificación
         token = s.dumps(email, salt='email-confirm')
-        confirm_url = url_for('confirm_email', token=token, _external=True)
+
+        # Definir la URL base de la API
+        base_url = "https://back-flask-production.up.railway.app"
+        
+        # Crear el enlace completo
+        confirm_url = f"{base_url}{url_for('confirm_email', token=token)}"
         
         # Configurar el cuerpo del mensaje en HTML
         html_body = f"""
@@ -295,7 +302,7 @@ def confirm_email(token):
     <html>
         <body>
             <script>
-                window.location.href = "http://localhost:3000/email-verified";
+                window.location.href = "https://front-prod-4r8v.onrender.com/email-verified";
             </script>
         </body>
     </html>
@@ -1396,7 +1403,7 @@ def obtener_transacciones(id_meta):
 
 def send_invitation_email(email, grupo_id, nombre_grupo):
     # URL para que el usuario acepte la invitación
-    accept_url = f"http://localhost:5000/api/accept_invitation?grupo_id={grupo_id}&email={email}"
+    accept_url = f"https://front-prod-4r8v.onrender.com//api/accept_invitation?grupo_id={grupo_id}&email={email}"
     msg = Message(
         subject="Invitación a unirse al grupo financiero",
         sender="tu_correo@example.com",
@@ -1654,6 +1661,80 @@ def obtener_gastos_grupo(grupo_id):
     finally:
         cursor.close()
         connection.close()
+
+@app.route('/api/grupo/<int:grupo_id>/salir', methods=['DELETE'],  endpoint='Salir_grupo')
+@jwt_refresh_if_active
+def salir_grupo(grupo_id):
+    user_id = get_jwt_identity()  # Obtener el ID del usuario autenticado
+
+    connection = create_connection()  # Conexión a la base de datos
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    cursor = connection.cursor(dictionary=True)
+
+    try:
+        # Verificar si el usuario pertenece al grupo
+        query_verificar = """
+        SELECT g.Nombre_Grupo, g.ID_Admin, 
+               CONCAT(u.Nombre, ' ', u.Apellido_P) AS Nombre_Completo,
+               u.Email 
+        FROM Miembro_Grupo mg
+        JOIN Grupo g ON mg.ID_Grupo = g.ID_Grupo
+        JOIN Usuario u ON mg.ID_Usuario = u.ID_Usuario
+        WHERE mg.ID_Usuario = %s AND mg.ID_Grupo = %s
+        """
+        cursor.execute(query_verificar, (user_id, grupo_id))
+        miembro_info = cursor.fetchone()
+
+        if not miembro_info:
+            return jsonify({"error": "No perteneces a este grupo"}), 403
+
+        # Verificar si el usuario es administrador (administradores no pueden darse de baja)
+        if miembro_info['ID_Admin'] == user_id:
+            return jsonify({"error": "No puedes salir del grupo porque eres el administrador"}), 403
+
+        # Eliminar al usuario del grupo
+        query_eliminar = """
+        DELETE FROM Miembro_Grupo
+        WHERE ID_Usuario = %s AND ID_Grupo = %s
+        """
+        cursor.execute(query_eliminar, (user_id, grupo_id))
+        connection.commit()
+
+        # Obtener el correo del administrador
+        query_admin_email = """
+        SELECT Email 
+        FROM Usuario 
+        WHERE ID_Usuario = %s
+        """
+        cursor.execute(query_admin_email, (miembro_info['ID_Admin'],))
+        admin_email = cursor.fetchone()
+
+        if admin_email:
+            # Enviar correo al administrador
+            msg = Message(
+                subject="Notificación de baja del grupo",
+                sender="tu_correo@example.com",
+                recipients=[admin_email['Email']],
+                body=(
+                    f"Hola,\n\n"
+                    f"El usuario {miembro_info['Nombre_Completo']} con correo {miembro_info['Email']} "
+                    f"se ha dado de baja de tu grupo \"{miembro_info['Nombre_Grupo']}\".\n\n"
+                    f"Saludos."
+                )
+            )
+            mail.send(msg)
+
+        return jsonify({"message": "Te has dado de baja del grupo exitosamente"}), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Error al procesar la solicitud: {str(e)}"}), 500
+
+    finally:
+        cursor.close()
+        connection.close()
+
 
 @app.route('/api/grupo/<int:grupo_id>/gastos/filtrados', methods=['POST'], endpoint='obtener_gastos_grupales_filtrados')
 @jwt_refresh_if_active
@@ -2648,45 +2729,6 @@ def change_admin(grupo_id):
         if 'connection' in locals() and connection is not None:
             connection.close()
 
-@app.route('/api/grupo/<int:grupo_id>/salir', methods=['DELETE'], endpoint='salir_grupo')
-@jwt_required()
-def salir_grupo(grupo_id):
-    """
-    Endpoint para que un usuario salga de un grupo.
-    """
-    user_id = get_jwt_identity()  # Obtener el ID del usuario autenticado
-
-    connection = create_connection()
-    if connection is None:
-        return jsonify({"error": "Error al conectar a la base de datos"}), 500
-
-    try:
-        cursor = connection.cursor(dictionary=True)
-
-        # Verificar si el usuario es administrador
-        query_check_admin = "SELECT ID_Admin FROM Grupo WHERE ID_Grupo = %s"
-        cursor.execute(query_check_admin, (grupo_id,))
-        group = cursor.fetchone()
-
-        if not group:
-            return jsonify({"error": "El grupo no existe."}), 404
-
-        if group['ID_Admin'] == user_id:
-            return jsonify({"error": "El administrador no puede abandonar el grupo."}), 403
-
-        # Eliminar al usuario de la tabla Miembro_Grupo
-        query_delete_member = "DELETE FROM Miembro_Grupo WHERE ID_Usuario = %s AND ID_Grupo = %s"
-        cursor.execute(query_delete_member, (user_id, grupo_id))
-        connection.commit()
-
-        return jsonify({"message": "Has salido del grupo exitosamente."}), 200
-
-    except Exception as e:
-        connection.rollback()
-        return jsonify({"error": f"Error al salir del grupo: {str(e)}"}), 500
-
-    finally:
-        connection.close()
 
 
 @app.route('/api/grupo/unirse', methods=['POST'], endpoint='unirse_grupo')
@@ -2756,7 +2798,9 @@ def unirse_grupo():
         # Enviar correo al administrador del grupo
         try:
             # Cambiar miembro_id por ID_Grupo e ID_Usuario
-            aceptar_url = f"http://127.0.0.1:5000/api/grupo/aceptar_solicitud?ID_Grupo={grupo['ID_Grupo']}&ID_Usuario={user_id}"
+            base_url = "https://back-flask-production.up.railway.app"
+            aceptar_url = f"{base_url}/api/grupo/aceptar_solicitud?ID_Grupo={grupo['ID_Grupo']}&ID_Usuario={user_id}"
+            
             msg = Message(
                 subject="Solicitud para unirse a tu grupo",
                 sender="fianzastt@gmail.com",
@@ -2767,8 +2811,12 @@ def unirse_grupo():
 
             El usuario con correo {email_usuario} ha solicitado unirse al grupo '{grupo['Nombre_Grupo']}'.
 
-            Haz clic en el siguiente enlace para aceptar la solicitud:
-            {aceptar_url}
+            Haz clic AQUI para aceptar la solicitud.
+            """
+            msg.html = f"""
+            <p>Hola {admin['Nombre']},</p>
+            <p>El usuario con correo {email_usuario} ha solicitado unirse al grupo '{grupo['Nombre_Grupo']}'.</p>
+            <p>Haz clic <a href="{aceptar_url}">AQUI</a> para aceptar la solicitud.</p>
             """
             mail.send(msg)
         except Exception as e:
@@ -2784,6 +2832,7 @@ def unirse_grupo():
     finally:
         cursor.close()
         connection.close()
+
 
 
 
@@ -2832,6 +2881,120 @@ def aceptar_solicitud():
 
     finally:
         cursor.close()
+        connection.close()
+
+
+@app.route('/api/forgot-password', methods=['POST'])
+def forgot_password():
+    data = request.json
+    email = data.get('email')
+
+    if not email:
+        return jsonify({"error": "El correo es obligatorio"}), 400
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+
+        # Verificar si el correo existe
+        query = "SELECT ID_Usuario FROM Usuario WHERE Email = %s"
+        cursor.execute(query, (email,))
+        user = cursor.fetchone()
+
+        if not user:
+            return jsonify({"error": "El correo no está registrado"}), 404
+
+        # Generar un código de verificación
+        verification_code = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        expiration_time = datetime.now() + timedelta(minutes=15)
+
+        # Guardar el código en memoria
+        verification_codes[email] = {
+            "code": verification_code,
+            "expires_at": expiration_time
+        }
+
+        # Enviar el código al correo
+        msg = Message(
+            subject="Código de recuperación de contraseña",
+            sender="fianzastt@gmail.com",
+            recipients=[email],
+            body=f"Tu código de verificación es: {verification_code}. Este código expira en 15 minutos."
+        )
+        mail.send(msg)
+
+        return jsonify({"message": "Código de verificación enviado"}), 200
+
+    except Exception as e:
+        print(f"Error interno del servidor: {str(e)}")
+        return jsonify({"error": f"Error interno del servidor: {str(e)}"}), 500
+
+    finally:
+        connection.close()
+
+
+
+@app.route('/api/verify-code', methods=['POST'])
+def verify_code():
+    data = request.json
+    email = data.get('email')
+    code = data.get('code')
+
+    if not email or not code:
+        return jsonify({"error": "Correo y código son obligatorios"}), 400
+
+    # Verificar si hay un código para este correo
+    if email not in verification_codes:
+        return jsonify({"error": "No se encontró un código para este correo"}), 404
+
+    stored_code = verification_codes[email]
+
+    # Verificar si el código ha expirado
+    if datetime.now() > stored_code["expires_at"]:
+        del verification_codes[email]  # Eliminar el código expirado
+        return jsonify({"error": "El código ha expirado"}), 400
+
+    # Verificar si el código coincide
+    if code != stored_code["code"]:
+        return jsonify({"error": "El código es incorrecto"}), 400
+
+    # Eliminar el código después de la verificación
+    del verification_codes[email]
+
+    return jsonify({"message": "Código verificado"}), 200
+
+
+
+@app.route('/api/update-password', methods=['POST'])
+def update_password():
+    data = request.json
+    email = data.get('email')
+    new_password = data.get('new_password')
+
+    if not email or not new_password:
+        return jsonify({"error": "Correo y nueva contraseña son obligatorios"}), 400
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor()
+
+        # Actualizar la contraseña
+        query = "UPDATE Usuario SET Contraseña = %s WHERE Email = %s"
+        cursor.execute(query, (new_password, email))
+        connection.commit()
+
+        return jsonify({"message": "Contraseña actualizada"}), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Error interno del servidor: {str(e)}"}), 500
+
+    finally:
         connection.close()
 
 
