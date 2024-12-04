@@ -80,30 +80,34 @@ def create_connection():
         print(f"Error al conectar a la base de datos: {e}")
         return None
 
-# FUNCION PARA INICIO DE SESION CON VALIDACION DE INGRESOS TAB Y JWT
+
+
 @app.route('/api/login', methods=['POST'])
 def login():
+    from datetime import timedelta
+    from dateutil.relativedelta import relativedelta
+
     data = request.json
     email = data.get('email')
     password = data.get('password')
-    
+
     connection = create_connection()
     if connection is None:
         return jsonify({"error": "Error al conectar a la base de datos"}), 500
-    
+
     cursor = connection.cursor(dictionary=True)
-    
+
     # Verificar si el usuario existe y las credenciales son correctas
     query_user = "SELECT * FROM Usuario WHERE Email = %s AND Contraseña = %s"
     cursor.execute(query_user, (email, password))
     user = cursor.fetchone()
-    
+
     if user:
         # Verificar que el usuario esté activo y haya verificado su correo
         if user['Estado_ID'] != 1:
             connection.close()
             return jsonify({"error": "Tu cuenta no está activa. Contacta al soporte."}), 403
-        
+
         if not user.get('email_verificado', False):
             connection.close()
             return jsonify({"error": "Debes verificar tu correo electrónico para iniciar sesión."}), 403
@@ -111,11 +115,11 @@ def login():
         # Obtener el ID del usuario
         user_id = user['ID_Usuario']
         print(f"ID del usuario: {user_id}")
-        
+
         # Crear token de acceso JWT
         access_token = create_access_token(identity=user_id)
 
-        # Verificar si el usuario pertenece a algún grupo o es administrador de uno
+        # Inicializar variables para los grupos
         pertenece_a_grupo = False
         es_admin_grupo = False
         grupos_administrados = []
@@ -142,7 +146,7 @@ def login():
 
         # Verificar si el usuario tiene ingresos registrados
         query_income = """
-        SELECT ID_Ingreso, Descripcion, Monto, Fecha, Periodicidad, EsFijo 
+        SELECT ID_Ingreso, Descripcion, Monto, Fecha, Periodicidad, EsFijo, EsPeriodico 
         FROM Ingreso 
         WHERE ID_Usuario = %s
         """
@@ -151,51 +155,99 @@ def login():
 
         hasIncome = bool(incomes)
         mostrar_tab_periodo = False
-        descripcion = None
-        fecha_ultimo_ingreso = None
+        mostrar_tab_periodo_fijos = False
+        descripcion_no_fijo = None
+        descripcion_fijo = None
+        monto_no_fijo = None
+        monto_fijo = None
+        fecha_ultimo_ingreso_no_fijo = None
+        fecha_ultimo_ingreso_fijo = None
+        fecha_termino_periodo_no_fijo = None
+        fecha_termino_periodo_fijo = None
 
         if hasIncome:
             print(f"El usuario tiene {len(incomes)} ingresos registrados.")
-            # Agrupar ingresos no fijos por descripción y seleccionar el más reciente
-            ingresos_no_fijos = {income['Descripcion']: income for income in incomes if income['EsFijo'] == 0}
 
-            # Inicializar variables fuera del bucle
-            fecha_siguiente_ingreso = None  # Inicializamos con un valor por defecto
-            mostrar_tab_periodo = False
+            # Procesar ingresos no fijos periódicos
+            ingresos_no_fijos_periodicos = [
+                income for income in incomes if income['EsFijo'] == 0 and income['EsPeriodico'] == 1
+            ]
+            ingresos_no_fijos_por_descripcion = {}
+            for income in ingresos_no_fijos_periodicos:
+                desc = income['Descripcion']
+                if desc not in ingresos_no_fijos_por_descripcion or income['Fecha'] > ingresos_no_fijos_por_descripcion[desc]['Fecha']:
+                    ingresos_no_fijos_por_descripcion[desc] = income
 
-            # Verificar si hay ingresos no fijos registrados
-            if ingresos_no_fijos:
-                for descripcion, income in ingresos_no_fijos.items():
-                    fecha_ultimo_ingreso = income['Fecha']
-                    periodicidad = income['Periodicidad']
+            for desc, income in ingresos_no_fijos_por_descripcion.items():
+                print(f"Validando ingreso no fijo periódico: {income}")
+                fecha_ultimo_ingreso_no_fijo = income['Fecha']
+                monto_no_fijo = income['Monto']
+                periodicidad = income['Periodicidad']
 
-                    # Calcular la fecha de comparación según la periodicidad
-                    if periodicidad == 'Diario':
-                        fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(days=1)
-                    elif periodicidad == 'Semanal':
-                        fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(weeks=1)
-                    elif periodicidad == 'Quincenal':
-                        fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(weeks=2)
-                    elif periodicidad == 'Mensual':
-                        fecha_siguiente_ingreso = fecha_ultimo_ingreso + relativedelta(months=1)
+                # Calcular la fecha de comparación según la periodicidad
+                if periodicidad == 'Diario':
+                    fecha_termino_periodo_no_fijo = fecha_ultimo_ingreso_no_fijo + timedelta(days=1)
+                elif periodicidad == 'Semanal':
+                    fecha_termino_periodo_no_fijo = fecha_ultimo_ingreso_no_fijo + timedelta(weeks=1)
+                elif periodicidad == 'Quincenal':
+                    fecha_termino_periodo_no_fijo = fecha_ultimo_ingreso_no_fijo + timedelta(weeks=2)
+                elif periodicidad == 'Mensual':
+                    fecha_termino_periodo_no_fijo = fecha_ultimo_ingreso_no_fijo + relativedelta(months=1)
 
-                    # Validar si la fecha siguiente ingreso está definida y si es necesario mostrar el tab
-                    if fecha_siguiente_ingreso and datetime.now().date() >= fecha_siguiente_ingreso:
-                        mostrar_tab_periodo = True
-                        break
+                print(f"Fecha límite para el ingreso no fijo: {fecha_termino_periodo_no_fijo}")
+                if datetime.now().date() >= fecha_termino_periodo_no_fijo:
+                    mostrar_tab_periodo = True
+                    descripcion_no_fijo = income['Descripcion']
+                    break
 
+            # Procesar ingresos fijos periódicos
+            ingresos_fijos = [income for income in incomes if income['EsFijo'] == 1 and income['EsPeriodico'] == 1]
+            ingresos_fijos_por_descripcion = {}
+            for income in ingresos_fijos:
+                desc = income['Descripcion']
+                if desc not in ingresos_fijos_por_descripcion or income['Fecha'] > ingresos_fijos_por_descripcion[desc]['Fecha']:
+                    ingresos_fijos_por_descripcion[desc] = income
+
+            for desc, income in ingresos_fijos_por_descripcion.items():
+                print(f"Validando ingreso fijo periódico: {income}")
+                fecha_ultimo_ingreso_fijo = income['Fecha']
+                monto_fijo = income['Monto']
+                periodicidad = income['Periodicidad']
+
+                # Calcular la fecha de comparación según la periodicidad
+                if periodicidad == 'Diario':
+                    fecha_termino_periodo_fijo = fecha_ultimo_ingreso_fijo + timedelta(days=1)
+                elif periodicidad == 'Semanal':
+                    fecha_termino_periodo_fijo = fecha_ultimo_ingreso_fijo + timedelta(weeks=1)
+                elif periodicidad == 'Quincenal':
+                    fecha_termino_periodo_fijo = fecha_ultimo_ingreso_fijo + timedelta(weeks=2)
+                elif periodicidad == 'Mensual':
+                    fecha_termino_periodo_fijo = fecha_ultimo_ingreso_fijo + relativedelta(months=1)
+
+                print(f"Fecha límite para el ingreso fijo: {fecha_termino_periodo_fijo}")
+                if datetime.now().date() >= fecha_termino_periodo_fijo:
+                    mostrar_tab_periodo_fijos = True
+                    descripcion_fijo = income['Descripcion']
+                    break
 
         connection.close()
 
-        # Generar la respuesta final sin almacenar en localStorage
+        # Generar la respuesta final
         response_data = {
             "message": "Login exitoso",
             "token": access_token,
             "user": user,
             "hasIncome": hasIncome,
             "showFloatingTabIncome": mostrar_tab_periodo,
-            "descripcionIngreso": descripcion,
-            "fechaUltimoIngreso": fecha_ultimo_ingreso.strftime('%d/%m/%Y') if fecha_ultimo_ingreso else None,
+            "showFloatingTabFixedIncome": mostrar_tab_periodo_fijos,
+            "descripcionIngresoNoFijo": descripcion_no_fijo,
+            "montoIngresoNoFijo": monto_no_fijo,
+            "fechaUltimoIngresoNoFijo": fecha_ultimo_ingreso_no_fijo.strftime('%d/%m/%Y') if fecha_ultimo_ingreso_no_fijo else None,
+            "fechaTerminoPeriodoNoFijo": fecha_termino_periodo_no_fijo.strftime('%d/%m/%Y') if fecha_termino_periodo_no_fijo else None,
+            "descripcionIngresoFijo": descripcion_fijo,
+            "montoIngresoFijo": monto_fijo,
+            "fechaUltimoIngresoFijo": fecha_ultimo_ingreso_fijo.strftime('%d/%m/%Y') if fecha_ultimo_ingreso_fijo else None,
+            "fechaTerminoPeriodoFijo": fecha_termino_periodo_fijo.strftime('%d/%m/%Y') if fecha_termino_periodo_fijo else None,
             "showFloatingTab": not hasIncome and not incomes,
             "pertenece_a_grupo": pertenece_a_grupo,
             "es_admin_grupo": es_admin_grupo,
@@ -207,6 +259,24 @@ def login():
     else:
         connection.close()
         return jsonify({"error": "Correo o contraseña incorrectos"}), 401
+
+
+
+
+def calcular_fecha_periodo(fecha, periodicidad):
+    """
+    Calcula la fecha donde terminó el último periodo según la periodicidad.
+    """
+    if periodicidad == 'Diario':
+        return fecha + timedelta(days=1)
+    elif periodicidad == 'Semanal':
+        return fecha + timedelta(weeks=1)
+    elif periodicidad == 'Quincenal':
+        return fecha + timedelta(weeks=2)
+    elif periodicidad == 'Mensual':
+        return fecha + relativedelta(months=1)
+    return fecha
+
 
 
 
@@ -251,12 +321,7 @@ def register():
 
         # Enviar correo de verificación
         token = s.dumps(email, salt='email-confirm')
-
-        # Definir la URL base de la API
-        base_url = "https://back-flask-production.up.railway.app"
-        
-        # Crear el enlace completo
-        confirm_url = f"{base_url}{url_for('confirm_email', token=token)}"
+        confirm_url = url_for('confirm_email', token=token, _external=True)
         
         # Configurar el cuerpo del mensaje en HTML
         html_body = f"""
@@ -319,7 +384,7 @@ def agregar_ingreso():
     periodicidad = data.get('periodicidad', None)
     es_fijo = data.get('esFijo', None)
     es_periodico = data.get('es_periodico', True)  # Por defecto, es periódico si no se especifica lo contrario
-    
+
     # Verificar si se envió una fecha en el payload; si no, usar la fecha actual
     fecha = data.get('fecha', None)
     if fecha:
@@ -340,10 +405,10 @@ def agregar_ingreso():
     # Si el frontend solo envía el monto, buscamos un ingreso existente con la misma descripción
     if descripcion is None or tipo is None:
         # Si solo se recibe el monto, estamos actualizando el ingreso periódico sin cambiar la descripción ni otros datos
-        print("Actualización de ingreso con solo monto y fecha actual")
+        print("Actualización de ingreso con solo monto y fecha estimada del periodo")
 
         query_find_ingreso = """
-        SELECT ID_Ingreso, Descripcion, Tipo, Periodicidad, EsFijo, EsPeriodico
+        SELECT ID_Ingreso, Descripcion, Tipo, Periodicidad, EsFijo, EsPeriodico, Fecha
         FROM Ingreso
         WHERE ID_Usuario = %s AND Descripcion = %s
         ORDER BY Fecha DESC
@@ -359,16 +424,20 @@ def agregar_ingreso():
             periodicidad = ingreso_existente[3]
             es_fijo = ingreso_existente[4]
             es_periodico = ingreso_existente[5]
+            fecha_ultimo_ingreso = ingreso_existente[6]
 
-            # Insertamos un nuevo ingreso con el monto y la fecha actualizada
+            # Calcular la fecha estimada donde terminó el último periodo
+            fecha_termino_periodo = calcular_fecha_periodo(fecha_ultimo_ingreso, periodicidad)
+
+            # Insertamos un nuevo ingreso con la fecha estimada del periodo en lugar de la fecha actual
             query_insert = """
             INSERT INTO Ingreso (Descripcion, Monto, Fecha, Tipo, ID_Usuario, Periodicidad, EsFijo, EsPeriodico)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """
-            cursor.execute(query_insert, (descripcion, monto, fecha, tipo, id_usuario, periodicidad, es_fijo, es_periodico))
+            cursor.execute(query_insert, (descripcion, monto, fecha_termino_periodo, tipo, id_usuario, periodicidad, es_fijo, es_periodico))
             connection.commit()
 
-            print(f"Ingreso con solo monto y fecha actual procesado correctamente para {descripcion}")
+            print(f"Ingreso con fecha estimada del periodo procesado correctamente para {descripcion}")
             connection.close()
             return jsonify({"message": "Ingreso actualizado con éxito"}), 201
         else:
@@ -393,17 +462,7 @@ def agregar_ingreso():
         if ingreso_existente:
             # Comprobar si el periodo ha pasado basándose en la periodicidad
             fecha_ultimo_ingreso = ingreso_existente[1]
-            fecha_siguiente_ingreso = None
-
-            # Determinar la fecha de comparación en base a la periodicidad
-            if periodicidad == 'Diario':
-                fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(days=1)
-            elif periodicidad == 'Semanal':
-                fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(weeks=1)
-            elif periodicidad == 'Quincenal':
-                fecha_siguiente_ingreso = fecha_ultimo_ingreso + timedelta(weeks=2)
-            elif periodicidad == 'Mensual':
-                fecha_siguiente_ingreso = fecha_ultimo_ingreso + relativedelta(months=1)
+            fecha_siguiente_ingreso = calcular_fecha_periodo(fecha_ultimo_ingreso, periodicidad)
 
             # Si el periodo ha pasado, insertamos un nuevo ingreso
             if fecha >= fecha_siguiente_ingreso:
@@ -411,7 +470,7 @@ def agregar_ingreso():
                 INSERT INTO Ingreso (Descripcion, Monto, Fecha, Tipo, ID_Usuario, Periodicidad, EsFijo, EsPeriodico)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """
-                cursor.execute(query_insert, (descripcion, monto, fecha, tipo, id_usuario, periodicidad, es_fijo, es_periodico))
+                cursor.execute(query_insert, (descripcion, monto, fecha_siguiente_ingreso, tipo, id_usuario, periodicidad, es_fijo, es_periodico))
                 print(f"Ingreso periódico insertado correctamente para {descripcion}")
             else:
                 print("El periodo aún no ha pasado, no se actualiza")
@@ -430,6 +489,22 @@ def agregar_ingreso():
         connection.close()
 
         return jsonify({"message": "Ingreso procesado exitosamente"}), 201
+
+
+def calcular_fecha_periodo(fecha, periodicidad):
+    """
+    Calcula la fecha donde terminó el último periodo según la periodicidad.
+    """
+    if periodicidad == 'Diario':
+        return fecha + timedelta(days=1)
+    elif periodicidad == 'Semanal':
+        return fecha + timedelta(weeks=1)
+    elif periodicidad == 'Quincenal':
+        return fecha + timedelta(weeks=2)
+    elif periodicidad == 'Mensual':
+        return fecha + relativedelta(months=1)
+    return fecha
+
 
 
 
@@ -1403,28 +1478,14 @@ def obtener_transacciones(id_meta):
 
 def send_invitation_email(email, grupo_id, nombre_grupo):
     # URL para que el usuario acepte la invitación
-    accept_url = f"https://back-flask-production.up.railway.app/api/accept_invitation?grupo_id={grupo_id}&email={email}"
+    accept_url = f"http://localhost:5000/api/accept_invitation?grupo_id={grupo_id}&email={email}"
     msg = Message(
         subject="Invitación a unirse al grupo financiero",
         sender="tu_correo@example.com",
-        recipients=[email]
+        recipients=[email],
+        body=f"Has sido invitado a unirte al grupo '{nombre_grupo}'. Haz clic en el siguiente enlace para aceptar la invitación:\n{accept_url}"
     )
-    
-    # Cuerpo del correo en texto plano
-    msg.body = f"""
-    Has sido invitado a unirte al grupo '{nombre_grupo}'.
-    Haz clic en el siguiente enlace para aceptar la invitación:
-    {accept_url}
-    """
-    
-    # Cuerpo del correo en HTML
-    msg.html = f"""
-    <p>Has sido invitado a unirte al grupo <strong>{nombre_grupo}</strong>.</p>
-    <p>Haz clic <a href="{accept_url}">AQUI</a> para aceptar la invitación.</p>
-    """
-    
-    mail.send(msg)
-    
+    mail.send(msg)       
         
     
 @app.route('/api/accept_invitation', methods=['GET'])
@@ -2812,9 +2873,7 @@ def unirse_grupo():
         # Enviar correo al administrador del grupo
         try:
             # Cambiar miembro_id por ID_Grupo e ID_Usuario
-            base_url = "https://back-flask-production.up.railway.app"
-            aceptar_url = f"{base_url}/api/grupo/aceptar_solicitud?ID_Grupo={grupo['ID_Grupo']}&ID_Usuario={user_id}"
-            
+            aceptar_url = f"https://back-flask-production.up.railway.app/api/grupo/aceptar_solicitud?ID_Grupo={grupo['ID_Grupo']}&ID_Usuario={user_id}"
             msg = Message(
                 subject="Solicitud para unirse a tu grupo",
                 sender="fianzastt@gmail.com",
@@ -2825,12 +2884,8 @@ def unirse_grupo():
 
             El usuario con correo {email_usuario} ha solicitado unirse al grupo '{grupo['Nombre_Grupo']}'.
 
-            Haz clic AQUI para aceptar la solicitud.
-            """
-            msg.html = f"""
-            <p>Hola {admin['Nombre']},</p>
-            <p>El usuario con correo {email_usuario} ha solicitado unirse al grupo '{grupo['Nombre_Grupo']}'.</p>
-            <p>Haz clic <a href="{aceptar_url}">AQUI</a> para aceptar la solicitud.</p>
+            Haz clic en el siguiente enlace para aceptar la solicitud:
+            {aceptar_url}
             """
             mail.send(msg)
         except Exception as e:
@@ -2846,7 +2901,6 @@ def unirse_grupo():
     finally:
         cursor.close()
         connection.close()
-
 
 
 
@@ -3010,6 +3064,7 @@ def update_password():
 
     finally:
         connection.close()
+
 
 
 
