@@ -1478,7 +1478,7 @@ def obtener_transacciones(id_meta):
 
 def send_invitation_email(email, grupo_id, nombre_grupo):
     # URL para que el usuario acepte la invitación
-    accept_url = f"http://localhost:5000/api/accept_invitation?grupo_id={grupo_id}&email={email}"
+    accept_url = f"https://back-flask-production.up.railway.app/api/accept_invitation?grupo_id={grupo_id}&email={email}"
     msg = Message(
         subject="Invitación a unirse al grupo financiero",
         sender="tu_correo@example.com",
@@ -2873,7 +2873,7 @@ def unirse_grupo():
         # Enviar correo al administrador del grupo
         try:
             # Cambiar miembro_id por ID_Grupo e ID_Usuario
-            aceptar_url = f"https://back-flask-production.up.railway.app/api/grupo/aceptar_solicitud?ID_Grupo={grupo['ID_Grupo']}&ID_Usuario={user_id}"
+            aceptar_url = f"https://front-prod-4r8v.onrender.com/api/grupo/aceptar_solicitud?ID_Grupo={grupo['ID_Grupo']}&ID_Usuario={user_id}"
             msg = Message(
                 subject="Solicitud para unirse a tu grupo",
                 sender="fianzastt@gmail.com",
@@ -3068,6 +3068,6 @@ def update_password():
 
 
 
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000, debug=True)
-
