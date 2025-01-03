@@ -12,6 +12,7 @@ import random
 import string
 from flask_jwt_extended import create_access_token, get_jwt_identity
 from flask import make_response
+from math import pow
 
 app = Flask(__name__)
 CORS(app)  # Habilitar CORS para todas las rutas y dominios
@@ -124,6 +125,52 @@ def login():
         es_admin_grupo = False
         grupos_administrados = []
         grupos_pertenecientes = []
+
+        # Verificar si el usuario tiene metas
+        cursor.execute("SELECT COUNT(*) AS total FROM Metas WHERE ID_Usuario = %s", (user_id,))
+        has_metas = cursor.fetchone()['total'] > 0
+
+        # Verificar si el usuario tiene ahorros
+        cursor.execute("SELECT COUNT(*) AS total FROM Ahorro1 WHERE ID_Usuario = %s", (user_id,))
+        has_ahorros = cursor.fetchone()['total'] > 0
+
+        # Verificar si el usuario tiene deudas
+        cursor.execute("SELECT COUNT(*) AS total FROM Deuda WHERE ID_Usuario = %s", (user_id,))
+        has_deudas = cursor.fetchone()['total'] > 0
+
+        # Verificar si el usuario tiene deudas
+        cursor.execute("SELECT COUNT(*) AS total FROM Deuda WHERE ID_Usuario = %s", (user_id,))
+        has_deudas = cursor.fetchone()['total'] > 0
+
+        # Verificar cuotas próximas a vencer
+        query_cuotas = """
+            SELECT c.ID_Deuda_Cuota, c.ID_Deuda, c.Cuota, c.Fecha_Limite, d.Descripcion AS Descripcion_Deuda
+            FROM Deuda_Cuota c
+            INNER JOIN Deuda d ON c.ID_Deuda = d.ID_Deuda
+            WHERE c.Estado = 'Pendiente' AND d.ID_Usuario = %s
+            ORDER BY c.Fecha_Limite ASC
+        """
+        cursor.execute(query_cuotas, (user_id,))
+        cuotas_pendientes = cursor.fetchall()
+
+        cuotas_proximas = []  # Lista para cuotas con fecha límite próxima
+        bandera_cuotas_proximas = False  # Bandera para indicar si hay cuotas próximas a vencer
+        fecha_actual = datetime.now().date()  # Fecha actual
+
+        # Procesar cuotas y calcular días restantes
+        for cuota in cuotas_pendientes:
+            fecha_limite = cuota['Fecha_Limite']
+            dias_restantes = (fecha_limite - fecha_actual).days
+            cuota['Dias_Restantes'] = dias_restantes
+
+            # Verificar si está dentro de los 3 días previos a la fecha límite
+            if 0 <= dias_restantes <= 3:
+                bandera_cuotas_proximas = True
+                cuotas_proximas.append(cuota)
+
+            # Print para depurar
+            print(f"Cuota ID: {cuota['ID_Deuda_Cuota']}, Días restantes: {dias_restantes}")
+
 
         # Verificar si es administrador de algún grupo
         cursor.execute("SELECT ID_Grupo, Nombre_Grupo FROM Grupo WHERE ID_Admin = %s", (user_id,))
@@ -252,7 +299,12 @@ def login():
             "pertenece_a_grupo": pertenece_a_grupo,
             "es_admin_grupo": es_admin_grupo,
             "grupos_administrados": grupos_administrados,
-            "grupos_pertenecientes": grupos_pertenecientes
+            "grupos_pertenecientes": grupos_pertenecientes,
+            "hasMetas": has_metas,
+            "hasAhorros": has_ahorros,
+            "hasDeudas": has_deudas,
+            "cuotasProximas" : cuotas_proximas,
+            "tieneCuotasProximas": bandera_cuotas_proximas,
         }
 
         return jsonify(response_data), 200
@@ -279,6 +331,41 @@ def calcular_fecha_periodo(fecha, periodicidad):
 
 
 
+@app.route('/api/estado-financiero', methods=['GET'])
+@jwt_required()
+def estado_financiero():
+    user_id = get_jwt_identity()
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    cursor = connection.cursor(dictionary=True)
+    
+    try:
+        # Verificar si el usuario tiene metas
+        cursor.execute("SELECT COUNT(*) AS total FROM Metas WHERE ID_Usuario = %s", (user_id,))
+        has_metas = cursor.fetchone()['total'] > 0
+
+        # Verificar si el usuario tiene ahorros
+        cursor.execute("SELECT COUNT(*) AS total FROM Ahorro1 WHERE ID_Usuario = %s", (user_id,))
+        has_ahorros = cursor.fetchone()['total'] > 0
+
+        # Verificar si el usuario tiene deudas
+        cursor.execute("SELECT COUNT(*) AS total FROM Deuda WHERE ID_Usuario = %s", (user_id,))
+        has_deudas = cursor.fetchone()['total'] > 0
+
+        return jsonify({
+            "hasMetas": has_metas,
+            "hasAhorros": has_ahorros,
+            "hasDeudas": has_deudas
+        }), 200
+
+    except Exception as e:
+        print(f"Error al verificar estado financiero: {e}")
+        return jsonify({"error": "Error al verificar estado financiero"}), 500
+
+    finally:
+        connection.close()
 
 
 
@@ -367,7 +454,7 @@ def confirm_email(token):
     <html>
         <body>
             <script>
-                window.location.href = "https://front-prod-4r8v.onrender.com/email-verified";
+                window.location.href = "http://localhost:3000/email-verified";
             </script>
         </body>
     </html>
@@ -1068,6 +1155,738 @@ def crear_meta():
 
 
 
+@app.route('/api/ahorro', methods=['POST'], endpoint='crear_ahorro')
+@jwt_refresh_if_active
+def crear_ahorro():
+    user_id = get_jwt_identity()
+    data = request.json
+    descripcion = data.get('descripcion')
+    monto_actual = float(data.get('montoActual', 0.0))  # Convertir a float
+    fecha_inicio = data.get('fechaInicio')
+    tasa_interes = data.get('tasaInteres')
+    
+    if not all([descripcion, fecha_inicio, tasa_interes]):
+        return jsonify({"error": "Datos incompletos"}), 400
+    
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+    
+    try:
+        cursor = connection.cursor()
+        
+        # Insertar en la tabla Ahorro1
+        query_ahorro = """
+            INSERT INTO Ahorro1 (Descripcion, Monto_Actual, Fecha_Inicio, Tasa_Interes, ID_Usuario)
+            VALUES (%s, %s, %s, %s, %s)
+        """
+        cursor.execute(query_ahorro, (descripcion, monto_actual, fecha_inicio, tasa_interes, user_id))
+        
+        # Obtener el ID del ahorro recién insertado
+        id_ahorro = cursor.lastrowid
+
+        # Si hay un monto inicial, registrar en la tabla Abono_Ahorro
+        if monto_actual > 0:  # Ahora la comparación es válida
+            query_abono = """
+                INSERT INTO Abono_Ahorro (ID_Ahorro, ID_Usuario, Abono, Fecha_Abono)
+                VALUES (%s, %s, %s, %s)
+            """
+            cursor.execute(query_abono, (id_ahorro, user_id, monto_actual, fecha_inicio))
+        
+        connection.commit()
+        return jsonify({"message": "Meta de ahorro creada exitosamente"}), 201
+    
+    except Exception as e:
+        connection.rollback()
+        print(f"Error al crear el ahorro: {e}")
+        return jsonify({"error": "Error al registrar el ahorro"}), 500
+    
+    finally:
+        connection.close()
+
+@app.route('/api/ahorros/<int:id_ahorro>', methods=['DELETE'])
+@jwt_required()
+def eliminar_ahorro(id_ahorro):
+    user_id = get_jwt_identity()
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor()
+
+        # Verificar si el ahorro pertenece al usuario
+        query_check = "SELECT ID_Ahorro FROM Ahorro1 WHERE ID_Ahorro = %s AND ID_Usuario = %s"
+        cursor.execute(query_check, (id_ahorro, user_id))
+        ahorro = cursor.fetchone()
+        if not ahorro:
+            return jsonify({"error": "Ahorro no encontrado o no autorizado"}), 404
+
+        # Eliminar el ahorro
+        query_delete = "DELETE FROM Ahorro1 WHERE ID_Ahorro = %s"
+        cursor.execute(query_delete, (id_ahorro,))
+        connection.commit()
+
+        return jsonify({"message": "Ahorro eliminado correctamente"}), 200
+
+    except Exception as e:
+        print(f"Error al eliminar el ahorro: {e}")
+        return jsonify({"error": "Error al eliminar el ahorro"}), 500
+
+    finally:
+        connection.close()
+
+
+
+@app.route('/api/ahorros', methods=['GET'], endpoint='obtener_ahorros')
+@jwt_refresh_if_active
+def obtener_ahorros():
+    user_id = get_jwt_identity()  # Obtener el ID del usuario autenticado
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+        query = """
+            SELECT ID_Ahorro, Descripcion, Monto_Actual, Fecha_Inicio, Tasa_Interes, Rendimiento
+            FROM Ahorro1
+            WHERE ID_Usuario = %s
+        """
+        cursor.execute(query, (user_id,))
+        ahorros = cursor.fetchall()
+        connection.close()
+
+        return jsonify(ahorros), 200
+    except Exception as e:
+        print("Error al obtener ahorros:", e)
+        return jsonify({"error": "Error al obtener ahorros"}), 500
+
+
+    
+
+@app.route('/api/ahorro/<int:id_ahorro>', methods=['GET'], endpoint='obtener_detalle_ahorro')
+@jwt_required()
+def obtener_detalle_ahorro(id_ahorro):
+    user_id = get_jwt_identity()
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+
+        # Obtener el detalle del ahorro
+        query_ahorro = """
+            SELECT ID_Ahorro, Descripcion, Monto_Actual, Fecha_Inicio, Tasa_Interes
+            FROM Ahorro1
+            WHERE ID_Ahorro = %s AND ID_Usuario = %s
+        """
+        cursor.execute(query_ahorro, (id_ahorro, user_id))
+        ahorro = cursor.fetchone()
+
+        if not ahorro:
+            return jsonify({"error": "Ahorro no encontrado"}), 404
+
+        # Obtener los abonos relacionados
+        query_abonos = """
+            SELECT ID_Abono, Abono, Fecha_Abono
+            FROM Abono_Ahorro
+            WHERE ID_Ahorro = %s
+            ORDER BY Fecha_Abono ASC
+        """
+        cursor.execute(query_abonos, (id_ahorro,))
+        abonos = cursor.fetchall()
+
+        ahorro['Abonos'] = abonos
+
+        return jsonify(ahorro), 200
+
+    except Exception as e:
+        print(f"Error al obtener el detalle del ahorro: {e}")
+        return jsonify({"error": "Error al obtener el detalle del ahorro"}), 500
+
+    finally:
+        connection.close()
+
+
+
+@app.route('/api/ahorro/<int:id_ahorro>/abonos', methods=['POST'], endpoint='registrar_abono_ahorro')
+@jwt_required()
+def registrar_abono_ahorro(id_ahorro):
+    user_id = get_jwt_identity()
+    data = request.json
+    abono = data.get('abono')
+    fecha_abono = data.get('fechaAbono')
+
+    if not abono or not fecha_abono:
+        return jsonify({"error": "Datos incompletos"}), 400
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor()
+
+        # Insertar el abono
+        query_abono = """
+            INSERT INTO Abono_Ahorro (ID_Ahorro, ID_Usuario, Abono, Fecha_Abono)
+            VALUES (%s, %s, %s, %s)
+        """
+        cursor.execute(query_abono, (id_ahorro, user_id, abono, fecha_abono))
+
+        # Actualizar el monto actual del ahorro
+        query_actualizar_ahorro = """
+            UPDATE Ahorro1
+            SET Monto_Actual = Monto_Actual + %s
+            WHERE ID_Ahorro = %s AND ID_Usuario = %s
+        """
+        cursor.execute(query_actualizar_ahorro, (abono, id_ahorro, user_id))
+
+        connection.commit()
+        return jsonify({"message": "Abono registrado exitosamente"}), 201
+
+    except Exception as e:
+        connection.rollback()
+        print(f"Error al registrar el abono: {e}")
+        return jsonify({"error": "Error al registrar el abono"}), 500
+
+    finally:
+        connection.close()
+
+
+
+
+from datetime import datetime, timedelta
+from flask import jsonify
+from math import pow
+
+@app.route('/api/ahorros/actualizar', methods=['POST'])
+def actualizar_ahorros():
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+
+        # Obtener todos los ahorros con tasa de interés > 0
+        query = """
+        SELECT * FROM Ahorro1 WHERE Tasa_Interes > 0
+        """
+        cursor.execute(query)
+        ahorros = cursor.fetchall()
+
+        for ahorro in ahorros:
+            monto_actual = float(ahorro['Monto_Actual'])
+            tasa_interes = float(ahorro['Tasa_Interes']) / 100
+            fecha_inicio = ahorro['Fecha_Inicio']
+            ultima_fecha = ahorro['Ultima_Fecha_Utilizacion'] or fecha_inicio
+            rendimiento_actual = float(ahorro['Rendimiento'] or 0)  # Rendimiento actual de la tabla
+            fecha_actual = datetime.now().date()
+
+            # Calcular días transcurridos
+            dias_transcurridos = (fecha_actual - ultima_fecha).days
+            print(f"Ahorro ID: {ahorro['ID_Ahorro']} - Días transcurridos: {dias_transcurridos}")
+
+            if dias_transcurridos > 0:
+                rendimiento_total = 0
+
+                for d in range(1, dias_transcurridos + 1):
+                    rendimiento_dia = monto_actual * (tasa_interes / 365)
+                    monto_actual += rendimiento_dia
+                    rendimiento_total += rendimiento_dia
+                    print(f"Día {d}: Rendimiento del día: {rendimiento_dia:.2f}, Saldo actual: {monto_actual:.2f}")
+
+                # Sumar el rendimiento acumulado al valor existente en la tabla
+                nuevo_rendimiento = rendimiento_actual + rendimiento_total
+
+                # Actualizar valores en la base de datos
+                query_update = """
+                UPDATE Ahorro1
+                SET Monto_Actual = %s,
+                    Ultima_Fecha_Utilizacion = %s,
+                    Rendimiento = %s
+                WHERE ID_Ahorro = %s
+                """
+                cursor.execute(query_update, (
+                    round(monto_actual, 2),
+                    fecha_actual,
+                    round(nuevo_rendimiento, 2),
+                    ahorro['ID_Ahorro']
+                ))
+                print(f"Ahorro ID: {ahorro['ID_Ahorro']} actualizado con éxito. Nuevo rendimiento total: {nuevo_rendimiento:.2f}")
+
+        connection.commit()
+        return jsonify({"message": "Ahorros actualizados correctamente."}), 200
+
+    except Exception as e:
+        print(f"Error al actualizar los ahorros: {e}")
+        return jsonify({"error": "Error al actualizar los ahorros"}), 500
+
+    finally:
+        connection.close()
+
+
+
+
+@app.route('/api/deuda', methods=['POST'], endpoint='crear_deuda')
+@jwt_refresh_if_active
+def crear_deuda():
+    user_id = get_jwt_identity()
+    data = request.json
+    descripcion = data.get('descripcion')
+    monto_deuda = data.get('montoDeuda')
+    monto_total = data.get('montoTotal')
+    tasa_interes = data.get('tasaInteres')
+    fecha_inicio = data.get('fechaInicio')
+    cuota_mensual = data.get('cuotaMensual')
+    plazo = data.get('plazo')  # Número de meses
+
+    if not all([descripcion, monto_deuda, monto_total, tasa_interes, fecha_inicio, cuota_mensual, plazo]):
+        return jsonify({"error": "Datos incompletos"}), 400
+
+    try:
+        # Convertir el plazo y la fecha de inicio
+        plazo = int(plazo)
+        fecha_inicio_dt = datetime.strptime(fecha_inicio, '%Y-%m-%d')
+
+        # Calcular la fecha límite de la deuda
+        fecha_limite = fecha_inicio_dt + relativedelta(months=plazo)
+
+        # Calcular la tasa mensual
+        tasa_anual = float(tasa_interes) / 100
+        r = tasa_anual / 12
+
+        connection = create_connection()
+        if connection is None:
+            return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+        cursor = connection.cursor()
+
+        # Insertar en la tabla Deuda
+        query_deuda = """
+            INSERT INTO Deuda (Descripcion, Monto_Deuda, Monto_Total, Tasa_Interes, Fecha_Inicio, Plazo, Fecha_Limite, ID_Usuario)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute(query_deuda, (descripcion, monto_deuda, monto_total, tasa_interes, fecha_inicio, plazo, fecha_limite.date(), user_id))
+        deuda_id = cursor.lastrowid
+
+        # Variables para cálculos
+        saldo_restante = float(monto_deuda)
+
+        # Insertar en la tabla Deuda_Cuota con cálculos adicionales
+        for i in range(plazo):
+            cuota_fecha_limite = fecha_inicio_dt + relativedelta(months=i + 1)  # Calcular la fecha límite de cada cuota
+
+            # Cálculos de los nuevos campos
+            interes_cuota = saldo_restante * r
+            capital_abonado = float(cuota_mensual) - interes_cuota
+            nuevo_saldo_restante = saldo_restante - capital_abonado
+
+            # Insertar la cuota
+            query_cuota = """
+                INSERT INTO Deuda_Cuota (ID_Deuda, Cuota, Interes_Cuota, Capital_Abonado, Saldo_Restante, Fecha_Limite, Estado)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(query_cuota, (
+                deuda_id,
+                cuota_mensual,
+                round(interes_cuota, 2),
+                round(capital_abonado, 2),
+                round(nuevo_saldo_restante, 2),
+                cuota_fecha_limite.date(),
+                'Pendiente'
+            ))
+
+            # Actualizar el saldo restante para la próxima cuota
+            saldo_restante = nuevo_saldo_restante
+
+        connection.commit()
+        connection.close()
+
+        return jsonify({"message": "Meta de deuda creada exitosamente"}), 201
+
+    except Exception as e:
+        print(f"Error al crear la deuda: {e}")
+        return jsonify({"error": "Error al crear la deuda"}), 500
+
+    
+
+@app.route('/api/deudas', methods=['GET'], endpoint='obtener_deudas')
+@jwt_refresh_if_active
+def obtener_deudas():
+    user_id = get_jwt_identity()  # ID del usuario autenticado
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+        query = """
+            SELECT ID_Deuda, Descripcion, Monto_Deuda, Monto_Total, Tasa_Interes, Plazo, Fecha_Inicio
+            FROM Deuda
+            WHERE ID_Usuario = %s
+        """
+        cursor.execute(query, (user_id,))
+        deudas = cursor.fetchall()
+        connection.close()
+
+        return jsonify(deudas), 200
+    except Exception as e:
+        print("Error al obtener las deudas:", e)
+        return jsonify({"error": "Error al obtener las deudas"}), 500
+    
+
+
+
+@app.route('/api/deudas/<int:id_deuda>/abonar', methods=['POST'], endpoint='abonar_deuda')
+@jwt_refresh_if_active
+def abonar_deuda(id_deuda):
+    user_id = get_jwt_identity()
+    data = request.json
+    monto_abonado = data.get('monto_abonado')
+    nueva_cuota = data.get('nueva_cuota')
+    saldo_anterior = data.get('saldo_anterior')
+    nuevo_saldo = data.get('nuevo_saldo')
+    tasa_interes = data.get('tasa_interes')  # Recibimos la tasa de interés
+
+    try:
+        tasa_interes = float(tasa_interes)  # Convertir la tasa de interés a float
+    except (ValueError, TypeError):
+        return jsonify({"error": "La tasa de interés no es válida"}), 400
+
+    if not all([monto_abonado, nueva_cuota, saldo_anterior, nuevo_saldo, tasa_interes]):
+        return jsonify({"error": "Datos incompletos"}), 400
+
+    try:
+        connection = create_connection()
+        if connection is None:
+            return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+        # Configurar el cursor como DictCursor
+        cursor = connection.cursor(dictionary=True)
+
+        # Obtener la descripción de la deuda
+        query_deuda = "SELECT Descripcion FROM Deuda WHERE ID_Deuda = %s"
+        cursor.execute(query_deuda, (id_deuda,))
+        deuda = cursor.fetchone()
+
+        if not deuda:
+            return jsonify({"error": "Deuda no encontrada"}), 404
+
+        descripcion_deuda = deuda['Descripcion']
+
+        # Crear registro en la tabla Abono_Deuda
+        query_abono = """
+            INSERT INTO Abono_Deuda (ID_Deuda, ID_Usuario, Monto_Anterior_Total, Monto_Abonado, Nuevo_Monto_Total, Fecha_Abono)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """
+        fecha_abono = datetime.now()
+        cursor.execute(query_abono, (
+            id_deuda,
+            user_id,
+            round(saldo_anterior, 2),
+            round(monto_abonado, 2),
+            round(nuevo_saldo, 2),
+            fecha_abono
+        ))
+
+        # Actualizar cuotas pendientes
+        query_cuotas_pendientes = """
+            SELECT ID_Deuda_Cuota, Saldo_Restante
+            FROM Deuda_Cuota
+            WHERE ID_Deuda = %s AND Estado = 'Pendiente'
+            ORDER BY Fecha_Limite ASC
+        """
+        cursor.execute(query_cuotas_pendientes, (id_deuda,))
+        cuotas_pendientes = cursor.fetchall()
+
+        if not cuotas_pendientes:
+            return jsonify({"error": "No hay cuotas pendientes para esta deuda"}), 400
+
+        saldo_restante = nuevo_saldo
+        tasa_mensual = tasa_interes / 100 / 12  # Usamos la tasa enviada desde el frontend
+
+        for cuota in cuotas_pendientes:
+            id_cuota = cuota['ID_Deuda_Cuota']
+            interes_cuota = saldo_restante * tasa_mensual
+            capital_abonado = nueva_cuota - interes_cuota
+            saldo_restante -= capital_abonado
+
+            query_update_cuota = """
+                UPDATE Deuda_Cuota
+                SET Cuota = %s, Interes_Cuota = %s, Capital_Abonado = %s, Saldo_Restante = %s
+                WHERE ID_Deuda_Cuota = %s
+            """
+            cursor.execute(query_update_cuota, (
+                round(nueva_cuota, 2),
+                round(interes_cuota, 2),
+                round(capital_abonado, 2),
+                round(saldo_restante, 2),
+                id_cuota
+            ))
+
+        # Insertar el registro en la tabla Gasto
+        query_insert_gasto = """
+            INSERT INTO Gasto (Descripcion, Monto, Fecha, Categoria, Periodico, Periodicidad, ID_Usuario, ID_Subcategoria, EsFijo, ID_Grupo)
+            VALUES (%s, %s, NOW(), %s, %s, NULL, %s, NULL, NULL, NULL)
+        """
+        descripcion_gasto = f"Abono ({descripcion_deuda})"
+        categoria = "Deuda"
+        periodico = 0  # Fijo en 0 para esta operación
+
+        cursor.execute(query_insert_gasto, (
+            descripcion_gasto,
+            round(monto_abonado, 2),
+            categoria,
+            periodico,
+            user_id
+        ))
+
+        connection.commit()
+        connection.close()
+
+        return jsonify({"message": "Abono realizado, cuotas actualizadas y gasto registrado correctamente"}), 200
+
+    except Exception as e:
+        print(f"Error al procesar el abono: {e}")
+        return jsonify({"error": "Error al procesar el abono"}), 500
+
+
+
+    
+
+@app.route('/api/deudas/<int:id_deuda>', methods=['DELETE'], endpoint='eliminar_deuda')
+@jwt_refresh_if_active
+def eliminar_deuda(id_deuda):
+    user_id = get_jwt_identity()  # ID del usuario autenticado
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor()
+        query = """
+            DELETE FROM Deuda
+            WHERE ID_Deuda = %s AND ID_Usuario = %s
+        """
+        cursor.execute(query, (id_deuda, user_id))
+        connection.commit()
+        connection.close()
+
+        return jsonify({"message": "Deuda eliminada exitosamente"}), 200
+    except Exception as e:
+        print("Error al eliminar la deuda:", e)
+        return jsonify({"error": "Error al eliminar la deuda"}), 500
+
+
+
+@app.route('/api/deudas/<int:id_deuda>', methods=['GET'], endpoint='obtener_detalle_deuda')
+@jwt_refresh_if_active
+def obtener_detalle_deuda(id_deuda):
+    user_id = get_jwt_identity()
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+
+        # Obtener la información de la deuda
+        query_deuda = """
+            SELECT ID_Deuda, Descripcion, Monto_Deuda, Monto_Total, Tasa_Interes, Plazo, Fecha_Inicio
+            FROM Deuda
+            WHERE ID_Deuda = %s AND ID_Usuario = %s
+        """
+        cursor.execute(query_deuda, (id_deuda, user_id))
+        deuda = cursor.fetchone()
+
+        if not deuda:
+            return jsonify({"error": "Deuda no encontrada"}), 404
+
+        # Obtener las cuotas relacionadas
+        query_cuotas = """
+            SELECT 
+                ID_Deuda_Cuota, 
+                Cuota, 
+                Interes_Cuota, 
+                Capital_Abonado, 
+                Saldo_Restante, 
+                Fecha_Limite, 
+                Estado,
+                CASE 
+                    WHEN Fecha_Limite < CURDATE() AND Estado = 'Pendiente' 
+                    THEN DATEDIFF(CURDATE(), Fecha_Limite)
+                    ELSE 0
+                END AS Dias_Atraso
+            FROM Deuda_Cuota
+            WHERE ID_Deuda = %s
+            ORDER BY Fecha_Limite ASC
+
+        """
+
+        cursor.execute(query_cuotas, (id_deuda,))
+        cuotas = cursor.fetchall()
+
+        deuda['Cuotas'] = cuotas
+
+        return jsonify(deuda), 200
+
+    except Exception as e:
+        print(f"Error al obtener el detalle de la deuda: {e}")
+        return jsonify({"error": "Error al obtener el detalle de la deuda"}), 500
+
+    finally:
+        connection.close()
+
+
+
+
+@app.route('/api/deudas/cuotas/<int:id_cuota>/pagar', methods=['PUT'], endpoint='pagar_cuota')
+@jwt_required()
+def pagar_cuota(id_cuota):
+    user_id = get_jwt_identity()  # Verificar que el usuario esté autenticado
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor()
+
+        # Verificar si la cuota pertenece al usuario
+        query_check = """
+            SELECT dc.ID_Deuda_Cuota, dc.Cuota, d.Descripcion
+            FROM Deuda_Cuota dc
+            JOIN Deuda d ON dc.ID_Deuda = d.ID_Deuda
+            WHERE dc.ID_Deuda_Cuota = %s AND d.ID_Usuario = %s
+        """
+        cursor.execute(query_check, (id_cuota, user_id))
+        cuota = cursor.fetchone()
+
+        if not cuota:
+            return jsonify({"error": "Cuota no encontrada o no pertenece al usuario"}), 404
+
+        cuota_id, monto_cuota, descripcion_deuda = cuota
+
+        # Actualizar el estado de la cuota a "Pagado"
+        query_update = """
+            UPDATE Deuda_Cuota
+            SET Estado = 'Pagado'
+            WHERE ID_Deuda_Cuota = %s
+        """
+        cursor.execute(query_update, (cuota_id,))
+        connection.commit()
+
+        # Registrar el gasto correspondiente en la tabla Gasto
+        descripcion_gasto = f"Pago deuda ({descripcion_deuda})"
+        query_gasto = """
+            INSERT INTO Gasto (Descripcion, Monto, Fecha, Categoria, Periodico, ID_Usuario)
+            VALUES (%s, %s, CURDATE(), 'Deuda', 0, %s)
+        """
+        cursor.execute(query_gasto, (descripcion_gasto, monto_cuota, user_id))
+        connection.commit()
+
+        return jsonify({"message": "Cuota marcada como pagada exitosamente y gasto registrado"}), 200
+
+    except Exception as e:
+        print(f"Error al pagar la cuota: {e}")
+        return jsonify({"error": "Error al pagar la cuota"}), 500
+
+    finally:
+        connection.close()
+
+
+
+@app.route('/api/deudas/cuotas/<int:id_cuota>/pagar-atrasada', methods=['PUT'], endpoint='pagar_cuota_atrasada')
+@jwt_refresh_if_active
+def pagar_cuota_atrasada(id_cuota):
+    data = request.json
+    nuevo_monto = data.get('nuevoMonto')
+
+    if not nuevo_monto or float(nuevo_monto) <= 0:
+        return jsonify({"error": "El monto ingresado no es válido"}), 400
+
+    try:
+        connection = create_connection()
+        if connection is None:
+            return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+        cursor = connection.cursor(dictionary=True)
+
+        # Obtener la cuota original
+        query_select_cuota = """
+            SELECT Cuota, Interes_Cuota, ID_Deuda
+            FROM Deuda_Cuota
+            WHERE ID_Deuda_Cuota = %s
+        """
+        cursor.execute(query_select_cuota, (id_cuota,))
+        cuota = cursor.fetchone()
+
+        if not cuota:
+            return jsonify({"error": "Cuota no encontrada"}), 404
+
+        monto_original = float(cuota['Cuota'])
+        interes_original = float(cuota['Interes_Cuota'])
+        id_deuda = cuota['ID_Deuda']
+
+        # Obtener la descripción de la deuda
+        query_deuda = "SELECT Descripcion FROM Deuda WHERE ID_Deuda = %s"
+        cursor.execute(query_deuda, (id_deuda,))
+        deuda = cursor.fetchone()
+
+        if not deuda:
+            return jsonify({"error": "Deuda no encontrada"}), 404
+
+        descripcion_deuda = deuda['Descripcion']
+
+        # Calcular la diferencia y actualizar los valores
+        diferencia = float(nuevo_monto) - monto_original
+        nuevo_interes = interes_original + diferencia
+
+        # Actualizar la cuota en la base de datos
+        query_update_cuota = """
+            UPDATE Deuda_Cuota
+            SET Cuota = %s, Interes_Cuota = %s, Estado = 'Pagado'
+            WHERE ID_Deuda_Cuota = %s
+        """
+        cursor.execute(query_update_cuota, (
+            round(nuevo_monto, 2),
+            round(nuevo_interes, 2),
+            id_cuota
+        ))
+
+        # Insertar el registro en la tabla Gasto
+        query_insert_gasto = """
+            INSERT INTO Gasto (Descripcion, Monto, Fecha, Categoria, Periodico, Periodicidad, ID_Usuario, ID_Subcategoria, EsFijo, ID_Grupo)
+            VALUES (%s, %s, NOW(), %s, %s, NULL, %s, NULL, NULL, NULL)
+        """
+        descripcion_gasto = f"Pago atrasado ({descripcion_deuda})"
+        categoria = "Deuda"
+        periodico = 0  # Fijo en 0 para esta operación
+        id_usuario = get_jwt_identity()  # Obtener el ID del usuario actual
+
+        cursor.execute(query_insert_gasto, (
+            descripcion_gasto,
+            round(nuevo_monto, 2),
+            categoria,
+            periodico,
+            id_usuario
+        ))
+
+        connection.commit()
+        connection.close()
+
+        return jsonify({"message": "Cuota atrasada pagada correctamente y gasto registrado"}), 200
+
+    except Exception as e:
+        print(f"Error al procesar el pago de la cuota atrasada: {e}")
+        return jsonify({"error": "Error al procesar el pago de la cuota atrasada"}), 500
+
+
+
+
 @app.route('/api/validar-ingresos-gastos', methods=['GET'], endpoint='Promedio_gastos_ingresos')
 @jwt_refresh_if_active
 def validar_ingresos_gastos():
@@ -1478,7 +2297,7 @@ def obtener_transacciones(id_meta):
 
 def send_invitation_email(email, grupo_id, nombre_grupo):
     # URL para que el usuario acepte la invitación
-    accept_url = f"https://back-flask-production.up.railway.app/api/accept_invitation?grupo_id={grupo_id}&email={email}"
+    accept_url = f"http://localhost:5000/api/accept_invitation?grupo_id={grupo_id}&email={email}"
     msg = Message(
         subject="Invitación a unirse al grupo financiero",
         sender="tu_correo@example.com",
@@ -2001,6 +2820,7 @@ def registrar_gasto_grupal(grupo_id):
     cursor = connection.cursor(dictionary=True)
 
     try:
+        # Verificar si el usuario es miembro del grupo y está confirmado
         query_verificar = """
         SELECT ID_Usuario, ID_Grupo, Confirmado, 
                CASE WHEN ID_Usuario = (SELECT ID_Admin FROM Grupo WHERE ID_Grupo = %s) THEN 1 ELSE 0 END AS es_admin
@@ -2015,23 +2835,61 @@ def registrar_gasto_grupal(grupo_id):
 
         es_admin = miembro['es_admin']
 
-        if es_admin and not es_mi_gasto:
+        # Caso especial: Gasto para "cualquiera" (asignado_a es None y es_mi_gasto es False)
+        if es_admin and not es_mi_gasto and not asignado_a:
             estado = "Pendiente"
-            asignado_a = None if not asignado_a else asignado_a
+            query_insert_grupal = """
+            INSERT INTO Gasto_Grupal (Descripcion, Monto, Fecha, ID_Grupo, Asignado_A, Estado)
+            VALUES (%s, %s, %s, %s, NULL, %s)
+            """
+            cursor.execute(query_insert_grupal, (descripcion, monto, fecha, grupo_id, estado))
 
-            query_insert = """
+        # Caso: Gasto asignado a un usuario o propio del admin
+        elif es_admin and (es_mi_gasto or asignado_a):
+            estado = "Pendiente" if asignado_a else "Pagado"
+            id_usuario_destino = asignado_a if asignado_a else user_id
+            query_insert_grupal = """
             INSERT INTO Gasto_Grupal (Descripcion, Monto, Fecha, ID_Grupo, Asignado_A, Estado)
             VALUES (%s, %s, %s, %s, %s, %s)
             """
-            cursor.execute(query_insert, (descripcion, monto, fecha, grupo_id, asignado_a, estado))
+            cursor.execute(query_insert_grupal, (descripcion, monto, fecha, grupo_id, id_usuario_destino, estado))
 
+            # Registrar en Gasto personal
+            query_insert_personal = """
+            INSERT INTO Gasto (Descripcion, Monto, Fecha, Categoria, ID_Subcategoria, ID_Usuario, Periodico, ID_Grupo, Periodicidad)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            categoria = "Grupal"
+            subcategoria = None
+            periodicidad = None
+            periodico = 0
+
+            cursor.execute(query_insert_personal, (
+                descripcion, monto, fecha, categoria, subcategoria, id_usuario_destino, periodico, grupo_id, periodicidad
+            ))
+
+        # Caso: Gasto propio del usuario no administrador
         else:
             estado = "Pagado"
-            query_insert = """
+            query_insert_grupal = """
             INSERT INTO Gasto_Grupal (Descripcion, Monto, Fecha, ID_Grupo, ID_Usuario, Estado)
             VALUES (%s, %s, %s, %s, %s, %s)
             """
-            cursor.execute(query_insert, (descripcion, monto, fecha, grupo_id, user_id, estado))
+            cursor.execute(query_insert_grupal, (descripcion, monto, fecha, grupo_id, user_id, estado))
+
+            # Registrar en Gasto personal
+            query_insert_personal = """
+            INSERT INTO Gasto (Descripcion, Monto, Fecha, Categoria, ID_Subcategoria, ID_Usuario, Periodico, ID_Grupo, Periodicidad)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            categoria = "Grupal"
+            subcategoria = None
+            periodicidad = None
+            periodico = 0
+
+            cursor.execute(query_insert_personal, (
+                descripcion, monto, fecha, categoria, subcategoria, user_id, periodico, grupo_id, periodicidad
+            ))
 
         connection.commit()
 
@@ -2044,6 +2902,7 @@ def registrar_gasto_grupal(grupo_id):
     finally:
         cursor.close()
         connection.close()
+
 
 
 
@@ -2432,7 +3291,7 @@ def registrar_aporte_grupal(grupo_id, meta_id):
 @jwt_refresh_if_active
 def reclamar_gasto(grupo_id, gasto_id):
     """
-    Endpoint para que un usuario reclame un gasto grupal como suyo.
+    Endpoint para que un usuario reclame un gasto grupal como suyo y lo registre como gasto personal.
     """
     user_id = get_jwt_identity()  # Obtener el ID del usuario autenticado
 
@@ -2458,7 +3317,7 @@ def reclamar_gasto(grupo_id, gasto_id):
 
         # Verificar que el gasto existe y aún está "pendiente"
         query_gasto = """
-        SELECT ID_Gasto_Grupal, Estado, ID_Usuario
+        SELECT ID_Gasto_Grupal, Estado, ID_Usuario, Descripcion, Monto, Fecha
         FROM Gasto_Grupal
         WHERE ID_Gasto_Grupal = %s AND ID_Grupo = %s
         """
@@ -2471,16 +3330,34 @@ def reclamar_gasto(grupo_id, gasto_id):
         if gasto['Estado'] != 'Pendiente' or gasto['ID_Usuario'] is not None:
             return jsonify({"error": "Este gasto ya ha sido reclamado o no está pendiente."}), 400
 
-        # Actualizar el gasto para asignarlo al usuario
+        # Actualizar el gasto grupal para asignarlo al usuario
         query_actualizar = """
         UPDATE Gasto_Grupal
         SET ID_Usuario = %s, Estado = 'Pagado'
         WHERE ID_Gasto_Grupal = %s AND ID_Grupo = %s
         """
         cursor.execute(query_actualizar, (user_id, gasto_id, grupo_id))
+
+        # Insertar el gasto en la tabla de Gasto personal
+        query_insert_personal = """
+        INSERT INTO Gasto (Descripcion, Monto, Fecha, Categoria, ID_Subcategoria, ID_Usuario, Periodico, ID_Grupo, Periodicidad)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        descripcion = gasto['Descripcion']
+        monto = gasto['Monto']
+        fecha = gasto['Fecha']
+        categoria = "Grupal"
+        subcategoria = None  # Si no hay subcategorías
+        periodicidad = None  # No aplica periodicidad para este caso
+        periodico = 0  # No es periódico
+
+        cursor.execute(query_insert_personal, (
+            descripcion, monto, fecha, categoria, subcategoria, user_id, periodico, grupo_id, periodicidad
+        ))
+
         connection.commit()
 
-        return jsonify({"message": "Gasto reclamado exitosamente"}), 200
+        return jsonify({"message": "Gasto reclamado y registrado como gasto personal exitosamente"}), 200
 
     except Exception as e:
         connection.rollback()
@@ -2489,6 +3366,9 @@ def reclamar_gasto(grupo_id, gasto_id):
     finally:
         cursor.close()
         connection.close()
+
+
+
 
 @app.route('/api/user/info', methods=['GET'], endpoint='get_user_info')
 @jwt_refresh_if_active
@@ -2873,7 +3753,7 @@ def unirse_grupo():
         # Enviar correo al administrador del grupo
         try:
             # Cambiar miembro_id por ID_Grupo e ID_Usuario
-            aceptar_url = f"https://front-prod-4r8v.onrender.com/api/grupo/aceptar_solicitud?ID_Grupo={grupo['ID_Grupo']}&ID_Usuario={user_id}"
+            aceptar_url = f"http://127.0.0.1:5000/api/grupo/aceptar_solicitud?ID_Grupo={grupo['ID_Grupo']}&ID_Usuario={user_id}"
             msg = Message(
                 subject="Solicitud para unirse a tu grupo",
                 sender="fianzastt@gmail.com",
