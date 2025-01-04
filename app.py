@@ -1524,6 +1524,7 @@ def obtener_deudas():
 
     try:
         cursor = connection.cursor(dictionary=True)
+        # Obtener todas las deudas del usuario
         query = """
             SELECT ID_Deuda, Descripcion, Monto_Deuda, Monto_Total, Tasa_Interes, Plazo, Fecha_Inicio
             FROM Deuda
@@ -1531,12 +1532,30 @@ def obtener_deudas():
         """
         cursor.execute(query, (user_id,))
         deudas = cursor.fetchall()
+
+        # Determinar el estado de cada deuda
+        for deuda in deudas:
+            query_cuotas = """
+                SELECT Estado
+                FROM Deuda_Cuota
+                WHERE ID_Deuda = %s
+            """
+            cursor.execute(query_cuotas, (deuda["ID_Deuda"],))
+            cuotas = cursor.fetchall()
+
+            # Verificar si hay cuotas pendientes
+            if any(cuota["Estado"] == "Pendiente" for cuota in cuotas):
+                deuda["Estatus"] = "En curso"
+            else:
+                deuda["Estatus"] = "Completada"
+
         connection.close()
 
         return jsonify(deudas), 200
     except Exception as e:
         print("Error al obtener las deudas:", e)
         return jsonify({"error": "Error al obtener las deudas"}), 500
+
     
 
 
@@ -1557,7 +1576,8 @@ def abonar_deuda(id_deuda):
     except (ValueError, TypeError):
         return jsonify({"error": "La tasa de interés no es válida"}), 400
 
-    if not all([monto_abonado, nueva_cuota, saldo_anterior, nuevo_saldo, tasa_interes]):
+    # Validar campos manualmente para permitir que `nueva_cuota` sea 0
+    if monto_abonado is None or nueva_cuota is None or saldo_anterior is None or nuevo_saldo is None or tasa_interes is None:
         return jsonify({"error": "Datos incompletos"}), 400
 
     try:
@@ -1611,22 +1631,33 @@ def abonar_deuda(id_deuda):
 
         for cuota in cuotas_pendientes:
             id_cuota = cuota['ID_Deuda_Cuota']
-            interes_cuota = saldo_restante * tasa_mensual
-            capital_abonado = nueva_cuota - interes_cuota
-            saldo_restante -= capital_abonado
 
-            query_update_cuota = """
-                UPDATE Deuda_Cuota
-                SET Cuota = %s, Interes_Cuota = %s, Capital_Abonado = %s, Saldo_Restante = %s
-                WHERE ID_Deuda_Cuota = %s
-            """
-            cursor.execute(query_update_cuota, (
-                round(nueva_cuota, 2),
-                round(interes_cuota, 2),
-                round(capital_abonado, 2),
-                round(saldo_restante, 2),
-                id_cuota
-            ))
+            # Si la nueva cuota es 0, marcar la cuota como pagada
+            if nueva_cuota == 0:
+                query_marcar_pagado = """
+                    UPDATE Deuda_Cuota
+                    SET Estado = 'Pagado', Saldo_Restante = 0, Capital_Abonado = Cuota, Interes_Cuota = 0
+                    WHERE ID_Deuda_Cuota = %s
+                """
+                cursor.execute(query_marcar_pagado, (id_cuota,))
+            else:
+                # Calcular la cuota normalmente
+                interes_cuota = saldo_restante * tasa_mensual
+                capital_abonado = nueva_cuota - interes_cuota
+                saldo_restante -= capital_abonado
+
+                query_update_cuota = """
+                    UPDATE Deuda_Cuota
+                    SET Cuota = %s, Interes_Cuota = %s, Capital_Abonado = %s, Saldo_Restante = %s
+                    WHERE ID_Deuda_Cuota = %s
+                """
+                cursor.execute(query_update_cuota, (
+                    round(nueva_cuota, 2),
+                    round(interes_cuota, 2),
+                    round(capital_abonado, 2),
+                    round(saldo_restante, 2),
+                    id_cuota
+                ))
 
         # Insertar el registro en la tabla Gasto
         query_insert_gasto = """
@@ -1653,6 +1684,7 @@ def abonar_deuda(id_deuda):
     except Exception as e:
         print(f"Error al procesar el abono: {e}")
         return jsonify({"error": "Error al procesar el abono"}), 500
+
 
 
 
@@ -1724,13 +1756,20 @@ def obtener_detalle_deuda(id_deuda):
             FROM Deuda_Cuota
             WHERE ID_Deuda = %s
             ORDER BY Fecha_Limite ASC
-
         """
 
         cursor.execute(query_cuotas, (id_deuda,))
         cuotas = cursor.fetchall()
 
+        # Calcular cuántas cuotas están pendientes
+        cuotas_pendientes = sum(1 for cuota in cuotas if cuota['Estado'] == 'Pendiente')
+
+        # Agregar la información de las cuotas pendientes a la respuesta
         deuda['Cuotas'] = cuotas
+        deuda['Cuotas_Pendientes'] = cuotas_pendientes
+
+        # Mostrar cuántas cuotas faltan en la terminal
+        print(f"Deuda ID {id_deuda} - Cuotas pendientes: {cuotas_pendientes}")
 
         return jsonify(deuda), 200
 
@@ -1740,6 +1779,7 @@ def obtener_detalle_deuda(id_deuda):
 
     finally:
         connection.close()
+
 
 
 
