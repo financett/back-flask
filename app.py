@@ -454,7 +454,7 @@ def confirm_email(token):
     <html>
         <body>
             <script>
-                window.location.href = "https://front-prod-4r8v.onrender.com";
+                window.location.href = "http://localhost:3000/";
             </script>
         </body>
     </html>
@@ -1298,13 +1298,70 @@ def obtener_detalle_ahorro(id_ahorro):
         cursor.execute(query_abonos, (id_ahorro,))
         abonos = cursor.fetchall()
 
+        # Obtener los retiros relacionados
+        query_retiros = """
+            SELECT ID_Retiro, Monto_Retirado, Fecha_Retiro
+            FROM Retiro_Ahorro
+            WHERE ID_Ahorro = %s
+            ORDER BY Fecha_Retiro ASC
+        """
+        cursor.execute(query_retiros, (id_ahorro,))
+        retiros = cursor.fetchall()
+
         ahorro['Abonos'] = abonos
+        ahorro['Retiros'] = retiros
 
         return jsonify(ahorro), 200
 
     except Exception as e:
         print(f"Error al obtener el detalle del ahorro: {e}")
         return jsonify({"error": "Error al obtener el detalle del ahorro"}), 500
+
+    finally:
+        connection.close()
+
+
+
+@app.route('/api/ahorro/<int:id_ahorro>/retiros', methods=['POST'], endpoint='registrar_retiro_ahorro')
+@jwt_required()
+def registrar_retiro_ahorro(id_ahorro):
+    user_id = get_jwt_identity()
+    data = request.json
+    monto_retirado = data.get('montoRetirado')
+    fecha_retiro = data.get('fechaRetiro')
+
+    if not monto_retirado or not fecha_retiro:
+        return jsonify({"error": "Datos incompletos"}), 400
+
+    connection = create_connection()
+    if connection is None:
+        return jsonify({"error": "Error al conectar a la base de datos"}), 500
+
+    try:
+        cursor = connection.cursor()
+
+        # Insertar el retiro
+        query_retiro = """
+            INSERT INTO Retiro_Ahorro (ID_Ahorro, ID_Usuario, Monto_Retirado, Fecha_Retiro)
+            VALUES (%s, %s, %s, %s)
+        """
+        cursor.execute(query_retiro, (id_ahorro, user_id, monto_retirado, fecha_retiro))
+
+        # Actualizar el monto actual del ahorro
+        query_actualizar_ahorro = """
+            UPDATE Ahorro1
+            SET Monto_Actual = Monto_Actual - %s
+            WHERE ID_Ahorro = %s AND ID_Usuario = %s
+        """
+        cursor.execute(query_actualizar_ahorro, (monto_retirado, id_ahorro, user_id))
+
+        connection.commit()
+        return jsonify({"message": "Retiro registrado exitosamente"}), 201
+
+    except Exception as e:
+        connection.rollback()
+        print(f"Error al registrar el retiro: {e}")
+        return jsonify({"error": "Error al registrar el retiro"}), 500
 
     finally:
         connection.close()
@@ -3984,7 +4041,6 @@ def update_password():
 
     finally:
         connection.close()
-
 
 
 
